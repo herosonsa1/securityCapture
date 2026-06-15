@@ -559,18 +559,15 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
             })
         return sub_masks
 
-    # 7. 이메일 주소 (예: abcde@domain.com -> abc***@domain.com)
-    # 아이디 앞 3자리를 제외한 나머지 글자 마스킹 (@ 직전까지)
+    # 7. 이메일 주소 → 전체 마스킹 (예: kim@company.com → ███████████████)
+    # 아이디+도메인 전체를 하나의 박스로 가립니다.
     elif EMAIL_PATTERN.search(text):
-        at_idx = text.find('@')
-        if at_idx > 3:
-            w_mask = (at_idx - 3) * char_w
-            sub_masks.append({
-                'x': int(x + 3 * char_w),
-                'y': y,
-                'width': int(w_mask),
-                'height': height
-            })
+        sub_masks.append({
+            'x': x,
+            'y': y,
+            'width': width,
+            'height': height
+        })
         return sub_masks
 
     # 8. 신용카드 번호 (예: 1234-1234-1234-1234 -> 1234-****-****-1234)
