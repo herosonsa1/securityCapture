@@ -99,3 +99,49 @@ for pattern, p_type in [
 | 5 | 차량번호 레이블+값 마스킹 | ✅ PASS |
 
 ---
+---
+
+## 2026-06-15 (추가) — 캡쳐방지 우회 후 운영서버 마스킹 실패 근본 원인 수정
+
+### 문제 제보
+> "캡쳐방지 우회 작업 이전에는 휴대폰번호 마스킹이 잘 됐는데, 이후 운영서버에서 잘 안 됨"
+
+### 근본 원인: Windows DPI Awareness 미설정으로 인한 좌표계 불일치
+
+운영서버 PC가 **고DPI(125%, 150%)** 설정인 경우, DPI Awareness가 없으면:
+
+| 구분 | 로컬(100% DPI) | 운영서버(125% DPI) |
+|------|--------------|-------------------|
+| Tkinter 창 좌표 | 논리px = 물리px | 논리px (작음) |
+| `mss`/`dxcam` 캡쳐 이미지 | 물리px = 논리px | **물리px (1.25배 큰 이미지)** |
+| OCR word.height | 예) 18px | 예) 22~27px |
+| 분리필드 gap 허용치 | 18×8=144px ✅ | **22×8=176px → 실제 gap 초과로 탐지 실패** |
+
+**흐름:**
+1. `screen_grab.py`의 `mss`가 물리픽셀(큰 이미지)로 캡쳐
+2. `capture_window.py`의 Tkinter 창은 논리픽셀 크기
+3. 이미지가 창보다 커서 마우스 선택 영역이 오프셋됨
+4. OCR 좌표도 물리픽셀 기준으로 나와 마스킹 영역이 실제 텍스트 위치와 어긋남
+
+### 수정 내용 (`capture_window.py`)
+
+```python
+# 1. 모듈 임포트 시 즉시 DPI Awareness 설정 (Tkinter 창 생성 전)
+_set_dpi_awareness()   # Per-Monitor V2 → V1 → 레거시 순 폴백
+
+# 2. 캡쳐 이미지 크기 ≠ Tkinter 창 크기일 때 자동 리사이즈
+img_w, img_h = self.screenshot.size
+if img_w != width or img_h != height:
+    print(f"[DPI보정] 캡쳐이미지({img_w}×{img_h}) → Tkinter창({width}×{height})으로 리사이즈")
+    self.screenshot = self.screenshot.resize((width, height), Image.Resampling.LANCZOS)
+```
+
+**적용 우선순위:**
+1. `SetProcessDpiAwareness(2)` — Per-Monitor DPI V2 (Windows 10 Anniversary+)
+2. `SetProcessDpiAwareness(1)` — Per-Monitor DPI V1 (Windows 8.1+)  
+3. `SetProcessDPIAware()` — 시스템 DPI (레거시 폴백)
+
+### 수정 파일
+- `capture_window.py` — DPI Awareness 설정 + 이미지 크기 보정
+
+---

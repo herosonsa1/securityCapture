@@ -6,6 +6,48 @@ from PIL import Image, ImageTk
 from screen_grab import grab_screen, get_virtual_screen_bounds
 
 
+def _set_dpi_awareness():
+    """
+    Windows DPI Awareness를 Per-Monitor V2(최고 수준)로 설정합니다.
+    이 설정을 하지 않으면 고DPI(125%, 150%) 모니터에서:
+    - Tkinter 창 좌표계(논리px) ↔ 캡쳐 이미지(물리px) 불일치 발생
+    - 캡쳐 이미지가 Tkinter 창보다 크게 잡혀 마우스 선택 영역 오프셋 발생
+    - OCR 단어 좌표가 실제 화면 위치와 어긋나 마스킹 영역 엉뚱하게 배치됨
+    """
+    try:
+        # Per-Monitor DPI Aware V2 (Windows 10 Anniversary 이상)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            # Per-Monitor DPI Aware V1 (Windows 8.1 이상)
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                # 시스템 DPI Aware (레거시 폴백)
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+
+def _get_dpi_scale():
+    """
+    현재 프로세스의 DPI 스케일 비율을 반환합니다.
+    예: 125% 배율 → 1.25, 150% 배율 → 1.5, 100% → 1.0
+    mss/dxcam은 물리픽셀로 캡쳐하고 Tkinter는 논리픽셀을 사용할 때
+    이 비율로 이미지를 조정하여 좌표계를 통일합니다.
+    """
+    try:
+        # GetDpiForSystem: 주 모니터 DPI (96이 기준 100%)
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        return dpi / 96.0
+    except Exception:
+        return 1.0
+
+
+# 모듈 임포트 시 즉시 DPI Awareness 설정 (Tkinter 창 생성 전에 반드시 실행되어야 함)
+_set_dpi_awareness()
+
+
 class CaptureWindow:
     """
     단축키 입력 시 실행되는 전체 화면 반투명 캡처 가이드 창입니다.
@@ -52,6 +94,17 @@ class CaptureWindow:
         if width == 0 or height == 0:
             width, height = self.screenshot.size
             left, top = 0, 0
+
+        # ── DPI 스케일 보정 ─────────────────────────────────────────────────
+        # mss/dxcam은 물리픽셀로 캡쳐하고, get_virtual_screen_bounds()는
+        # SetProcessDpiAwareness(2) 이후 물리픽셀을 반환합니다.
+        # 만약 캡쳐 이미지 크기와 논리 스크린 크기가 다르면 이미지를 논리픽셀 크기로
+        # 리사이즈하여 Tkinter 좌표계(논리px)와 통일합니다.
+        img_w, img_h = self.screenshot.size
+        if img_w != width or img_h != height:
+            print(f"[DPI보정] 캡쳐이미지({img_w}×{img_h}) → Tkinter창({width}×{height})으로 리사이즈")
+            self.screenshot = self.screenshot.resize((width, height), Image.Resampling.LANCZOS)
+        # ─────────────────────────────────────────────────────────────────────
         
         # 2. Tkinter Toplevel 윈도우 설정 (메인 루트의 자식 창)
         self.root = tk.Toplevel(self.parent)
