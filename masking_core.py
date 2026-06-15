@@ -73,7 +73,8 @@ COMMON_NAME_SYLLABLES = set("준서민영지수진훈현우호재태철석성원
 
 # 한글 이름 부분(성씨를 제외한 글자들)에 포함될 수 없는 인명 금지 음절 목록
 # 업무용 단어(예: 조회, 수정, 등록, 전체, 배치, 백업, 관리, 정보, 이력, 노드, 조직 등)에서 파생되는 글자들 차단
-FORBIDDEN_NAME_SYLLABLES = set("의체업치류객권법제과식품판표물별장역력록학교국실점비통등및것요함됨할적용조화회합식단")
+# ※ 주의: 장(이장훈), 화(김화진), 국(박국현), 함(함준혁) 등은 실제 인명용 음절이므로 제외함
+FORBIDDEN_NAME_SYLLABLES = set("의체업치류객권법제과식품판표물별역력록학교실점비통등및것요됨할적용조회합식단")
 
 # 한글 이름 오인식 방지를 위한 일반 업무용 및 시스템 메뉴 제외 명사 리스트 (Blacklist)
 EXCLUDE_NOUNS = {
@@ -1539,12 +1540,19 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
 def apply_mask(image, regions, mask_type="mosaic", mosaic_size=10):
     """
     주어진 이미지 객체 위에 지정된 영역들(regions)에 대해 마스킹 처리를 적용하여 새 이미지 객체를 반환합니다.
+    Excel 등 촘촘한 셀 레이아웃에서 텍스트 상하가 마스킹 박스를 벗어나는 문제를 막기 위해
+    각 마스킹 영역에 상하 2px 여백(V_PAD)을 자동으로 추가합니다.
     """
+    V_PAD = 2  # 상하 여백 (px) — Excel 셀처럼 텍스트가 빡빡하게 배치된 경우 경계 노출 방지
     img_masked = image.copy()
     draw = ImageDraw.Draw(img_masked)
     
     for r in regions:
         x, y, w, h = r['x'], r['y'], r['width'], r['height']
+        
+        # 상하 여백 확장 (이미지 경계를 초과하지 않도록 클램핑은 아래에서 처리)
+        y -= V_PAD
+        h += V_PAD * 2
         
         x = max(0, x)
         y = max(0, y)
