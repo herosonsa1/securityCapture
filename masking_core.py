@@ -465,7 +465,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
     if is_rrn:
         dash_idx = norm_text.find('-')
         if dash_idx != -1:
-            # 대시가 있는 경우 (예: 950101-1234567 → 950101-1*****)
             # 앞 6자리(생년월일) + 대시 1자리 + 성별 1자리 = 8자리 노출, 이후 6자리 가림
             w_back = 6 * char_w
             sub_masks.append({
@@ -475,7 +474,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'height': height
             })
         else:
-            # 대시가 없는 경우 (예: 9501011234567 → 9501011*****)
             # 앞 6자리(생년월일) + 성별 1자리 = 7자리 노출, 이후 6자리 가림
             w_back = 6 * char_w
             sub_masks.append({
@@ -484,7 +482,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(w_back),
                 'height': height
             })
-        return sub_masks
 
     # 2. 생년월일 (예: 1979.07.22 / 1979-07-22 → 19******)
     # 연도 앞 2자리만 남기고 뒤를 전부 가림
@@ -496,7 +493,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
             'width': int(w_mask),
             'height': height
         })
-        return sub_masks
 
     # 3. 전화번호 / 휴대전화번호 (예: 010-1234-5678 → 010-****-5678)
     # 가운데 4자리(국번) 마스킹
@@ -518,7 +514,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(4 * char_w),
                 'height': height
             })
-        return sub_masks
 
     # 4. 한글 사람 이름 (글자 수와 무관하게 이름 영역 전체 마스킹)
     elif is_likely_korean_name(text):
@@ -528,7 +523,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
             'width': width,
             'height': height
         })
-        return sub_masks
 
     # 5. 운전면허번호 (포맷: 지역코드2 - 일련번호6 - 검증번호2, 예: 92-123456-74)
     # 지역코드(앞 2자리)만 노출, 이후 전체(일련번호+검증) 마스킹
@@ -553,7 +547,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(8 * char_w),
                 'height': height
             })
-        return sub_masks
 
     # 6. 여권번호 (예: M12345678 → M123*****)
     elif PASSPORT_PATTERN.search(norm_text):
@@ -565,7 +558,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(w_mask),
                 'height': height
             })
-        return sub_masks
 
     # 7. 이메일 주소 → 전체 마스킹
     elif EMAIL_PATTERN.search(norm_text):
@@ -575,7 +567,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
             'width': width,
             'height': height
         })
-        return sub_masks
 
     # 8. 신용카드 번호 (예: 1234-1234-1234-1234 → 1234-****-****-1234)
     elif CARD_PATTERN.search(norm_text):
@@ -593,7 +584,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(8 * char_w),
                 'height': height
             })
-        return sub_masks
 
     # 9. 계좌번호 (예: 110-123-456789 → 110-123-*****)
     elif BANK_PATTERN.search(norm_text):
@@ -605,7 +595,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(w_mask),
                 'height': height
             })
-        return sub_masks
 
     # 10. IP 주소 (예: 192.168.1.1 → 192.168.*.**)
     elif IP_PATTERN.search(norm_text):
@@ -619,7 +608,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int(w_mask),
                 'height': height
             })
-        return sub_masks
 
     # 11. 주소 (예: 경기도 성남시 수정구 태평동 123 → 경기도 성남시 수정구 ****)
     elif ADDRESS_PATTERN.search(norm_text):
@@ -636,7 +624,6 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'width': int((len(norm_text) - match) * char_w),
                 'height': height
             })
-        return sub_masks
 
     # 12. 차량번호 (예: 12가1234 → 12가****)
     elif VEHICLE_PATTERN.search(norm_text):
@@ -652,10 +639,19 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                     'width': int(4 * char_w),
                     'height': height
                 })
-        return sub_masks
 
-    # 매칭되는 항목이 없으면 마스킹하지 않음 (단순 사번이나 숫자 시퀀스 보호)
-    return []
+    # 대괄호 '[', ']' 처리 보정: 대괄호 경계 근처의 마스킹 영역은 대괄호를 덮어쓰도록 확장
+    if sub_masks:
+        for mask in sub_masks:
+            # 텍스트에 '['가 존재하고 마스킹 영역의 시작이 텍스트 시작 근처이면 왼쪽 끝(x)으로 확장
+            if '[' in text and (mask['x'] - x) <= (char_w * 2.5):
+                mask['width'] += (mask['x'] - x)
+                mask['x'] = x
+            # 텍스트에 ']'가 존재하고 마스킹 영역의 끝이 텍스트 끝 근처이면 오른쪽 끝(x+width)으로 확장
+            if ']' in text and ((x + width) - (mask['x'] + mask['width'])) <= (char_w * 2.5):
+                mask['width'] = (x + width) - mask['x']
+
+    return sub_masks
 
 
 def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
