@@ -1333,8 +1333,12 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 combined_text_no_space = "".join(w['text'] for w in temp_words)
                 combined_text_with_space = " ".join(w['text'] for w in temp_words)
                 
-                m_no = target_pattern.search(combined_text_no_space)
-                m_with = target_pattern.search(combined_text_with_space)
+                # 대괄호 [ ] 제거 정규화 텍스트로 패턴 매칭
+                combined_norm_no = re.sub(r'[\[\]]', '', combined_text_no_space)
+                combined_norm_with = re.sub(r'[\[\]]', '', combined_text_with_space)
+                
+                m_no = target_pattern.search(combined_norm_no)
+                m_with = target_pattern.search(combined_norm_with)
                 
                 if m_no or m_with:
                     matched_group = list(temp_words)
@@ -1351,14 +1355,43 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 val_words = matched_group
                 
             if val_words:
-                merged = merge_boxes(val_words)
-                if merged:
-                    combined_text = " ".join(w['text'] for w in val_words)
-                    sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
-                    if sub_masks:
-                        mask_regions.extend(sub_masks)
+                if matched_label_type == "bank":
+                    # 계좌번호 분리 입력 필드 대응
+                    # 숫자 세그먼트 단어 추출
+                    numeric_segs = []
+                    for vw in val_words:
+                        digits_only = re.sub(r'\D', '', re.sub(r'[\[\]]', '', vw['text']))
+                        if digits_only:
+                            numeric_segs.append((vw, digits_only))
+                            
+                    if len(numeric_segs) >= 2:
+                        # 분리 필드 형태: 마지막 숫자 필드 박스 전체를 마스킹
+                        for idx_seg, (vw, digits) in enumerate(numeric_segs):
+                            if idx_seg == len(numeric_segs) - 1:
+                                mask_regions.append({
+                                    'x': vw['x'], 'y': vw['y'],
+                                    'width': vw['width'], 'height': vw['height']
+                                })
                     else:
-                        mask_regions.append(merged)
+                        # 단일 토큰 형태
+                        merged = merge_boxes(val_words)
+                        if merged:
+                            combined_text = re.sub(r'[\[\]]', '', "".join(w['text'] for w in val_words))
+                            sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
+                            if sub_masks:
+                                mask_regions.extend(sub_masks)
+                            else:
+                                mask_regions.append(merged)
+                else:
+                    # bank 외 나머지 5종 (passport, email, card, ip, vehicle)
+                    merged = merge_boxes(val_words)
+                    if merged:
+                        combined_text = " ".join(w['text'] for w in val_words)
+                        sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
+                        if sub_masks:
+                            mask_regions.extend(sub_masks)
+                        else:
+                            mask_regions.append(merged)
                 for vw in val_words:
                     used_indices.add(vw['_idx'])
 
@@ -1401,15 +1434,41 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                     addr_words.append(cand)
                     
             if addr_words:
-                merged = merge_boxes(addr_words)
-                if merged:
-                    combined_text = " ".join(w['text'] for w in addr_words)
-                    sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
-                    if sub_masks:
-                        mask_regions.extend(sub_masks)
+                # ── 개별 단어 단위 상세주소 판별 마스킹 ────────────────────────────
+                seen_base_addr = False
+                for aw in addr_words:
+                    aw_text_norm = re.sub(r'[\[\]]', '', aw['text']).strip()
+                    if not aw_text_norm:
+                        continue
+                    
+                    has_kw = False
+                    last_kw_idx = -1
+                    # 행정구역 키워드 검색
+                    for kw in ["구", "동", "읍", "면", "로", "길", "시", "도", "군", "가"]:
+                        idx = aw_text_norm.rfind(kw)
+                        if idx != -1:
+                            has_kw = True
+                            last_kw_idx = max(last_kw_idx, idx)
+                            
+                    if has_kw:
+                        seen_base_addr = True
+                        # 키워드 이후에 상세주소가 붙어있는 경우 부분 마스킹 (예: 대연3동54-1)
+                        if last_kw_idx + 1 < len(aw_text_norm):
+                            split_idx = last_kw_idx + 1
+                            char_w = aw['width'] / max(1, len(aw_text_norm))
+                            mask_regions.append({
+                                'x': int(aw['x'] + split_idx * char_w),
+                                'y': aw['y'],
+                                'width': int((len(aw_text_norm) - split_idx) * char_w),
+                                'height': aw['height']
+                            })
+                        # "동", "로" 등으로 끝나는 단어(예: "대연3동")는 기본 주소이므로 노출
                     else:
-                        # 주소 전체를 하나의 박스로 마스킹
-                        mask_regions.append(merged)
+                        # 행정구역 키워드가 없으면서, 이미 기본 주소를 지났거나 첫 단어부터 없는 경우 상세주소 단어로 간주하여 박스 전체 마스킹
+                        mask_regions.append({
+                            'x': aw['x'], 'y': aw['y'],
+                            'width': aw['width'], 'height': aw['height']
+                        })
                 for aw in addr_words:
                     used_indices.add(aw['_idx'])
                     

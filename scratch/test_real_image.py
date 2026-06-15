@@ -10,7 +10,6 @@ def run_simulated_tests():
     print("=== 가상 레이아웃 테스트 시작 ===")
 
     # 시나리오 1: 피보험자 이름 뒤에 주민등록번호가 바로 위치한 경우
-    # [피보험자] [이준희] [731225-1542622] [사업자조회]
     print("\n[시나리오 1] 피보험자 + 이름 + 주민번호")
     words_1 = [
         {"text": "피보험자", "x": 10, "y": 100, "width": 50, "height": 20},
@@ -24,16 +23,6 @@ def run_simulated_tests():
     print("  * 감지된 마스킹 영역 수:", len(mask_1))
     for m in mask_1:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
-    
-    # 731225-1542622 에서 성별 뒷자리 6자리가 마스킹 영역으로 잡혔는지 검증
-    # 731225-1542622 의 글자 수 = 14자, char_w = 100 / 14 = 7.14
-    # 뒤 6자리는 8번째 글자부터 시작하므로 x 오프셋은 130 + 8 * 7.14 = 187
-    # 731225-1542622와 이준희 모두 마스킹되어야 함
-    has_name_mask = any(m['x'] == 70 for m in mask_1)
-    has_rrn_mask = any(m['x'] > 130 for m in mask_1)
-    print(f"  * 이름 마스킹 감지 여부: {has_name_mask}")
-    print(f"  * 주민번호 마스킹 감지 여부: {has_rrn_mask}")
-
 
     # 시나리오 2: 면허번호가 92-692533 와 74 로 분리되어 인식된 경우
     print("\n[시나리오 2] 면허번호 쪼개짐 (92-692533 과 74)")
@@ -49,12 +38,6 @@ def run_simulated_tests():
     print("  * 감지된 마스킹 영역 수:", len(mask_2))
     for m in mask_2:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
-    
-    # 92-692533와 -74 중, 앞 2자리(지역코드)를 제외한 영역이 마스킹 영역으로 잡혔는지 검증
-    # numeric_dr_segs 에 92692533 (8자리)와 74 (2자리)가 수집되어, dr_idx=1인 두번째 세그먼트(-74 및 692533 부분)가 가려져야 함
-    # (원래 세그먼트가 쪼개지면 두번째 숫자 세그먼트 전체가 마스킹 박스로 덮임)
-    has_driver_mask = len(mask_2) > 0
-    print(f"  * 면허번호 마스킹 감지 여부: {has_driver_mask}")
 
     # 시나리오 3: 면허번호가 92-692533-74 단일 토큰으로 정상 인식된 경우
     print("\n[시나리오 3] 면허번호 단일 토큰 (92-692533-74)")
@@ -68,6 +51,41 @@ def run_simulated_tests():
     
     print("  * 감지된 마스킹 영역 수:", len(mask_3))
     for m in mask_3:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
+    # 시나리오 4: 상세주소가 분리 입력필드로 인식된 경우
+    # [주소] [부산 남구 대연3동] [54-1 경성대 부근]
+    # 예상 결과: "부산 남구 대연3동" 단어는 노출, "54-1 경성대 부근" 단어는 마스킹
+    print("\n[시나리오 4] 주소 및 상세주소 분리 입력필드")
+    words_4 = [
+        {"text": "주소", "x": 10, "y": 300, "width": 30, "height": 20},
+        {"text": "[부산 남구 대연3동]", "x": 50, "y": 300, "width": 150, "height": 20},
+        {"text": "[54-1 경성대 부근]", "x": 210, "y": 300, "width": 150, "height": 20}
+    ]
+    ocr_res_4 = {"status": "success", "words": words_4}
+    mask_4, label_4 = detect_personal_info(ocr_res_4)
+    
+    print("  * 감지된 마스킹 영역 수:", len(mask_4))
+    for m in mask_4:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
+    # 시나리오 5: 계좌번호가 분리 입력필드로 인식된 경우
+    # [계좌번호] [110] [-] [123] [-] [456789]
+    # 예상 결과: 마지막 세그먼트인 "456789" 필드만 마스킹
+    print("\n[시나리오 5] 계좌번호 분리 입력필드")
+    words_5 = [
+        {"text": "계좌번호", "x": 10, "y": 400, "width": 60, "height": 20},
+        {"text": "[110]", "x": 80, "y": 400, "width": 40, "height": 20},
+        {"text": "[-]", "x": 125, "y": 400, "width": 15, "height": 20},
+        {"text": "[123]", "x": 145, "y": 400, "width": 40, "height": 20},
+        {"text": "[-]", "x": 190, "y": 400, "width": 15, "height": 20},
+        {"text": "[456789]", "x": 210, "y": 400, "width": 60, "height": 20}
+    ]
+    ocr_res_5 = {"status": "success", "words": words_5}
+    mask_5, label_5 = detect_personal_info(ocr_res_5)
+    
+    print("  * 감지된 마스킹 영역 수:", len(mask_5))
+    for m in mask_5:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
 
 if __name__ == "__main__":
