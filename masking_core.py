@@ -235,7 +235,6 @@ def run_ocr(image_path):
     OCR 인식 결과 단어가 5개 미만인 경우(어두운 배경 등 이진화 실패 의심), 이미지 반전 후 2단계 재시도합니다.
     """
     import tempfile
-    from PIL import Image, ImageFilter, ImageOps
 
     scale_factor = 4.0  # 3.5 → 4.0: 소형 글자 및 저해상도 캡처 인식률 향상
 
