@@ -990,9 +990,13 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                             break
 
                 # 비어있거나 제외 명사 리스트에 속하면 건너뜀
-                if not cand_clean or cand_clean in EXCLUDE_NOUNS:
+                if not cand_clean:
+                    # 한글/영문자가 없는 숫자/기호인 경우 (주민번호, 전화번호 필드 등)
+                    # 이름 매칭 대상은 아니지만, RRN/Phone 매칭은 진행할 수 있어야 하므로 break하지 않고 건너뜁니다.
+                    pass
+                elif cand_clean in EXCLUDE_NOUNS:
                     if name_found:
-                        break  # 이름 이후 업무 명사 → 스캔 종료
+                        break  # 이름 이후 실제 업무 명사를 만나면 스캔 종료
                     continue
 
                 # 이름을 이미 찾은 후 또 다른 한글 단어 → 스캔 영역 종료
@@ -1215,18 +1219,17 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
 
                 # 숫자가 있으면 후보로 수집
                 if digits_only:
-                    # 면허번호 분리 입력 필드 자릿수: 2자리(지역코드) · 6자리(일련번호) · 2자리(검증번호)
-                    # 단일 토큰이면 10자리(대시 없는 연속) 또는 대시 포함 패턴으로 판단
                     total_collected = ''.join(d for _, d in driver_seg_counts) + digits_only
-                    if len(digits_only) in (2, 6, 10) or (driver_words and len(total_collected) <= 10):
+                    # 누적 자릿수가 10자리 이하이거나, 또는 이번 단어를 더해서 정확히 10자리를 일시적으로 초과하더라도 수집할 수 있게 최대 12자리까지 허용
+                    if len(total_collected) <= 12:
                         driver_words.append(cand)
                         driver_seg_counts.append((cand, digits_only))
                         prev_dr = cand
-                        # 총 10자리가 모이면 수집 완료
-                        if len(total_collected) == 10:
+                        # 누적 자릿수가 10자리 이상 채워지면 수집 완료
+                        if len(total_collected) >= 10:
                             break
                     else:
-                        break  # 자릿수 불일치 → 종료
+                        break  # 자릿수 초과 → 종료
                 elif is_dash_only:
                     # 대시는 세그먼트 사이 연결자로만 허용 (수집 시작 후에만)
                     if driver_words:
@@ -1251,7 +1254,29 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                     # 첫 번째 세그먼트(지역코드 2자리)만 노출, 나머지(일련번호 6자리 + 검증번호 2자리) 마스킹
                     for dr_idx, (pw, digits) in enumerate(numeric_dr_segs):
                         if dr_idx == 0:
-                            continue  # 지역코드(첫 번째 2자리)는 노출
+                            # 첫 번째 세그먼트더라도 숫자가 2자리를 초과하면, 그 단어 내의 앞 2자리 이후는 마스킹해야 함
+                            # 예: "92-692533" -> 앞 "92" 및 대시 이후를 마스킹 영역에 추가
+                            pw_text_norm = re.sub(r'[\[\]]', '', pw['text'])
+                            digits_found = 0
+                            split_idx = len(pw_text_norm)
+                            for c_idx, char in enumerate(pw_text_norm):
+                                if char.isdigit():
+                                    digits_found += 1
+                                    if digits_found == 2:
+                                        # 지역코드 2자리가 채워진 다음 문자부터 가림 (예: 대시가 있으면 대시부터 마스킹)
+                                        split_idx = c_idx + 1
+                                        break
+                            
+                            if split_idx < len(pw_text_norm):
+                                char_w = pw['width'] / max(1, len(pw_text_norm))
+                                mask_regions.append({
+                                    'x': int(pw['x'] + split_idx * char_w),
+                                    'y': pw['y'],
+                                    'width': int((len(pw_text_norm) - split_idx) * char_w),
+                                    'height': pw['height']
+                                })
+                            continue  # 지역코드(첫 번째 2자리)가 들어있는 부분은 노출하고 루프 계속
+                        
                         mask_regions.append({
                             'x': pw['x'], 'y': pw['y'],
                             'width': pw['width'], 'height': pw['height']
