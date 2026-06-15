@@ -525,9 +525,15 @@ class EditWindow:
                 if show_popup:
                     messagebox.showinfo("완료", "마스킹된 이미지가 클립보드에 복사되었습니다!\n다른 앱에 바로 붙여넣기(Ctrl+V) 하세요.", parent=self.root)
             else:
-                messagebox.showerror("실패", f"클립보드 복사 중 파워쉘 오류 발생: {result.stderr}", parent=self.root)
+                if show_popup:
+                    messagebox.showerror("실패", f"클립보드 복사 중 파워쉘 오류 발생: {result.stderr}", parent=self.root)
+                else:
+                    print(f"[클립보드 자동복사 오류] {result.stderr}")
         except Exception as e:
-            messagebox.showerror("오류", f"클립보드 복사 중 예외 발생: {str(e)}", parent=self.root)
+            if show_popup:
+                messagebox.showerror("오류", f"클립보드 복사 중 예외 발생: {str(e)}", parent=self.root)
+            else:
+                print(f"[클립보드 자동복사 예외] {e}")
         finally:
             if os.path.exists(temp_out_path):
                 try:

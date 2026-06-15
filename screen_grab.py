@@ -109,8 +109,8 @@ def _grab_via_mss(region=None):
                 left, top, right, bottom = region
                 mon = {"left": left, "top": top, "width": right - left, "height": bottom - top}
             else:
-                # 전체 가상 스크린
-                mon = sct.monitors[0]  # monitors[0] = 전체 가상 스크린 합산
+                # 주 모니터만 캡쳐 (monitors[0]=전체 가상스크린, monitors[1]=주 모니터)
+                mon = sct.monitors[1]
             frame = sct.grab(mon)
             return Image.frombytes("RGB", frame.size, frame.bgra, "raw", "BGRX")
     except Exception as e:
@@ -306,12 +306,14 @@ def _log_method(method_name):
 
 
 def get_virtual_screen_bounds():
-    """다중 모니터 포함 전체 가상 스크린 경계를 반환합니다."""
-    left   = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-    top    = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-    width  = ctypes.windll.user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-    height = ctypes.windll.user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
-    return left, top, width, height
+    """주 모니터(기본 모니터) 경계를 반환합니다.
+    듀얼 모니터 환경에서 캡쳐 창이 모든 모니터에 걸쳐 펼쳐지는 문제를 막기 위해
+    SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN(전체 가상스크린) 대신
+    SM_CXSCREEN/SM_CYSCREEN(주 모니터)을 기준으로 반환합니다.
+    """
+    width  = ctypes.windll.user32.GetSystemMetrics(0)   # SM_CXSCREEN: 주 모니터 너비
+    height = ctypes.windll.user32.GetSystemMetrics(1)   # SM_CYSCREEN: 주 모니터 높이
+    return 0, 0, width, height
 
 
 def install_dependencies():
