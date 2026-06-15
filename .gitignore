@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# 가상환경
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# 테스트용 임시 이미지
+test_*.png
+grab_test_result.png
+
+# 배포 파일
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db

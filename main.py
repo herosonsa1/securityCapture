@@ -1,0 +1,395 @@
+import sys
+import io
+import os
+
+# PyInstaller GUI (--noconsole) 모드에서 표준 출력 관련 크래시 방지 및 디버깅을 위한 파일 리다이렉트
+import tempfile
+try:
+    log_path = os.path.join(tempfile.gettempdir(), "privacy_masker_debug.log")
+    sys.stdout = open(log_path, "a", encoding="utf-8", buffering=1)
+    sys.stderr = sys.stdout
+    print("\n--- APP START ---")
+except Exception as e:
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+
+import queue
+import threading
+import tkinter as tk
+import winreg
+from PIL import Image, ImageDraw
+import pystray
+from pynput import keyboard
+
+# 내부 모듈 로드
+from capture_window import CaptureWindow
+from edit_window import EditWindow
+from config_manager import load_config, save_config
+
+
+class PrivacyMaskerApp:
+    """
+    개인정보 마스킹 캡처 프로그램의 메인 컨트롤러 클래스입니다.
+    트레이 아이콘 관리 및 전역 단축키 수신, 스레드-세이프 캡처 흐름 제어를 오케스트레이션합니다.
+    """
+    def __init__(self):
+        self.root = None
+        self.tray_icon = None
+        self.keyboard_listener = None
+        self.capturing = False # 캡처 창이 이미 떠있는지 방지용 플래그
+        self.current_edit_win = None # 현재 열려 있는 편집 창 인스턴스 참조 보관용
+        
+        # 설정 로드 및 마지막 캡처 캐시 변수 초기화
+        self.config = load_config()
+        self.last_crop_area = None
+
+    def create_tray_image(self):
+        """
+        메모리 상에서 실시간으로 파란색 방패/자물쇠 형태의 트레이 아이콘 이미지를 렌더링합니다.
+        외부 이미지 파일 종속성을 제거하여 배포를 수월하게 합니다.
+        """
+        image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        dc = ImageDraw.Draw(image)
+        # 자물쇠 몸통 (둥근 사각형)
+        dc.rounded_rectangle([12, 22, 52, 58], radius=6, fill="#007acc", outline="#ffffff", width=3)
+        # 자물쇠 고리 (아크선)
+        dc.arc([20, 6, 44, 34], 180, 0, fill="#ffffff", width=4)
+        # 자물쇠 내부 구멍 (열쇠구멍 효과)
+        dc.ellipse([28, 34, 36, 42], fill="#ffffff")
+        dc.polygon([(32, 40), (29, 50), (35, 50)], fill="#ffffff")
+        return image
+
+    def on_hotkey_triggered(self):
+        """
+        단축키 입력 시 실행되는 콜백 함수 (스레드-세이프하게 Tkinter 루프에 전달)
+        """
+        # 캡처 중이 아니거나, 캡처 중이더라도 활성화된 편집 창이 떠 있다면 핫키 트리거 허용
+        if not self.capturing or self.current_edit_win:
+            self.root.after(0, self.trigger_capture)
+
+    def trigger_capture(self):
+        """
+        메인 GUI 루프에서 안전하게 캡처 작업을 개시합니다 (메인 스레드 순차 실행).
+        """
+        if self.capturing:
+            # 캡처 편집창이 열려 있는 상태에서 전역 F9 입력 시 다시 캡처 수행
+            if self.current_edit_win:
+                self.root.after(0, self.current_edit_win.request_recapture)
+            return
+        self.capturing = True
+        
+        # 캡처 및 편집 루프 오케스트레이션 (다시 캡처 기능 지원)
+        try:
+            recapture = True
+            while recapture:
+                # 1. 사각 영역 캡처 창 표시
+                cap_win = CaptureWindow(self.root)
+                crop_area = cap_win.start()
+                
+                if not crop_area:
+                    # 사용자가 캡처를 취소했거나 영역이 유효하지 않은 경우 흐름 종료
+                    break
+                    
+                # 최근 캡처 이미지 데이터 캐싱
+                self.last_crop_area = crop_area
+                
+                # 최신 설정 로드 후 편집창을 열지 않는 즉시 복사 모드 판정
+                self.config = load_config()
+                show_editor = self.config.get("show_editor", True)
+                
+                if not show_editor:
+                    # 편집창을 생략하고 백그라운드에서 마스킹 및 클립보드 자동 전송 수행
+                    self.run_background_masking_flow(crop_area)
+                    break
+                    
+                # 2. 마스킹 편집기 GUI 창 표시
+                edit_win = EditWindow(self.root, crop_area)
+                self.current_edit_win = edit_win
+                try:
+                    # edit_win.show()는 편집이 끝나고 창이 닫히면 "다시 캡처" 여부 플래그(bool)를 리턴합니다.
+                    recapture = edit_win.show()
+                finally:
+                    self.current_edit_win = None
+        finally:
+            self.capturing = False
+
+    def run_background_masking_flow(self, crop_area):
+        """
+        편집창 생략 모드 시 백그라운드 스레드에서 OCR 및 마스킹 처리를 수행하고
+        완성된 비트맵 이미지를 클립보드에 무소음 전송 및 알림을 수행합니다.
+        """
+        def worker():
+            import tempfile
+            import os
+            import subprocess
+            from masking_core import run_ocr, detect_personal_info, apply_mask
+            from config_manager import load_config
+            
+            # 알림 발송용 유틸리티 함수
+            def notify_msg(title, message):
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.notify(message, title)
+                    except Exception as e:
+                        print(f"알림 전송 실패: {e}")
+            
+            # 0. 로컬 최신 설정 읽기
+            config = load_config()
+            mask_type = config.get("mask_type", "mosaic")
+            name_mask_style = config.get("name_mask_style", "middle")
+            
+            # 1. OCR 대상 이미지를 임시 저장
+            temp_dir = tempfile.gettempdir()
+            temp_in_path = os.path.join(temp_dir, "temp_bg_ocr_target.png")
+            original_image = crop_area["image"]
+            original_image.save(temp_in_path)
+            
+            # 2. OCR 수행
+            ocr_result = run_ocr(temp_in_path)
+            
+            # 임시 파일 백그라운드 안전 삭제
+            def safe_remove(path):
+                import time
+                for _ in range(5):
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                            break
+                        except:
+                            time.sleep(0.2)
+                    else:
+                        break
+            
+            if ocr_result.get("status") != "success":
+                notify_msg("분석 실패", "OCR 분석에 실패하여 마스킹을 적용하지 못했습니다.")
+                safe_remove(temp_in_path)
+                return
+                
+            # 3. 개인정보 식별 및 마스킹 영역 좌표 생성
+            # detect_personal_info는 (mask_regions, label_regions) 튜플을 반환합니다.
+            # 백그라운드 즉시 복사 모드에서는 label_regions(항목명 강조)가 불필요하므로 mask_boxes만 사용합니다.
+            mask_boxes, _label_regions = detect_personal_info(ocr_result, name_mask_style)
+            
+            # 4. 이미지 마스킹 필터 적용
+            final_img = apply_mask(original_image, mask_boxes, mask_type=mask_type, mosaic_size=10)
+            
+            # 5. 클립보드 복사용 임시 세이브
+            temp_out_path = os.path.join(temp_dir, "temp_bg_copied_capture.png")
+            final_img.save(temp_out_path)
+            
+            # 6. PowerShell .NET 호출을 통한 이미지 픽셀 데이터 클립보드 복사
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            safe_path = temp_out_path.replace("\\", "\\\\")
+            ps_cmd = (
+                "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
+                "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing'); "
+                f"$img = [System.Drawing.Image]::FromFile('{safe_path}'); "
+                "[System.Windows.Forms.Clipboard]::SetImage($img); "
+                "$img.Dispose();"
+            )
+            
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                ps_cmd
+            ]
+            
+            try:
+                result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
+                if result.returncode == 0:
+                    cnt = len(mask_boxes)
+                    if cnt > 0:
+                        notify_msg("복사 완료", "개인정보가 제외(마스킹)된 이미지가 클립보드에 복사되었습니다!")
+                    else:
+                        notify_msg("복사 완료", "개인정보가 없는 깨끗한 이미지가 클립보드에 복사되었습니다.")
+                else:
+                    notify_msg("오류 발생", f"클립보드 데이터 탑재 실패: {result.stderr}")
+            except Exception as e:
+                notify_msg("오류 발생", f"클립보드 처리 예외 발생: {str(e)}")
+            finally:
+                safe_remove(temp_in_path)
+                safe_remove(temp_out_path)
+                
+        # 백그라운드 데몬 스레드로 비동기 구동
+        threading.Thread(target=worker, daemon=True).start()
+
+    def toggle_show_editor_opt(self, icon, item):
+        """
+        트레이 아이콘의 '캡처 후 편집창 열기' 메뉴 선택 시 옵션을 토글 및 영구 보존합니다.
+        """
+        self.config = load_config()
+        self.config["show_editor"] = not self.config.get("show_editor", True)
+        save_config(self.config)
+        # 트레이 메뉴 상태 동기화를 위해 아이콘 업데이트 유도
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+
+    def open_last_capture_editor(self):
+        """
+        가장 최근에 캡처한 이미지 데이터를 복원하여 편집창을 강제 개시합니다.
+        """
+        if not self.last_crop_area:
+            from tkinter import messagebox
+            # root 스레드-세이프 대화상자 노출
+            self.root.after(0, lambda: messagebox.showwarning("복원 불가", "최근 캡처한 이미지 데이터가 없습니다!\n단축키(F9)로 먼저 화면을 캡처해 주세요.", parent=self.root))
+            return
+            
+        if self.capturing:
+            return
+            
+        def run_editor():
+            self.capturing = True
+            try:
+                # 최근 캡처 복원 편집창 오픈
+                edit_win = EditWindow(self.root, self.last_crop_area)
+                self.current_edit_win = edit_win
+                try:
+                    edit_win.show()
+                finally:
+                    self.current_edit_win = None
+            finally:
+                self.capturing = False
+                
+        self.root.after(0, run_editor)
+
+    def start_tray(self):
+        """
+        시스템 트레이 아이콘을 시작합니다.
+        """
+        menu = pystray.Menu(
+            pystray.MenuItem("화면 캡처 (F9)", lambda icon, item: self.on_hotkey_triggered(), default=True),
+            pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
+            pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("종료", lambda icon, item: self.root.after(0, self.exit_app))
+        )
+        
+        self.tray_icon = pystray.Icon(
+            "PrivacyMasker", 
+            self.create_tray_image(), 
+            "개인정보마스킹", 
+            menu
+        )
+        # 트레이 아이콘을 백그라운드 스레드에서 구동
+        self.tray_icon.run_detached()
+        
+        # 시스템 트레이 실행 즉시 윈도우 알림 토스트 메시지 전송
+        # 캡처 후 편집창 띄우기 옵션이 꺼져(체크해제) 있을 때만 백그라운드 실행을 알리기 위해 토스트 알림을 띄웁니다.
+        if not self.config.get("show_editor", True):
+            try:
+                self.tray_icon.notify(
+                    "윈도우 시작 시 자동 기동 등록 완료! F9 를 눌러 즉시 기능을 시작할 수 있습니다.",
+                    "개인정보마스킹 실행 중"
+                )
+            except Exception as e:
+                print(f"알림 팝업 전송 실패: {e}")
+
+    def exit_app(self):
+        """
+        프로그램을 완전히 종료합니다. (메인 GUI 스레드에서 실행되어야 함)
+        """
+        print("\n프로그램을 종료합니다.")
+        
+        # 1. 트레이 아이콘 숨기기 및 비동기 종료
+        # visible = False로 트레이 아이콘을 즉시 감추고, stop()은 백그라운드 스레드에서 수행해 join 블로킹을 방지합니다.
+        if self.tray_icon:
+            try:
+                self.tray_icon.visible = False
+                tray = self.tray_icon
+                threading.Thread(target=tray.stop, daemon=True).start()
+            except:
+                pass
+            self.tray_icon = None
+            
+        # 2. 리스너 중지
+        if self.keyboard_listener:
+            try:
+                self.keyboard_listener.stop()
+            except:
+                pass
+            
+        # 3. Tkinter 루프 종료
+        if self.root:
+            try:
+                self.root.quit()
+                self.root.destroy()
+            except:
+                pass
+            
+        # OS 트레이 삭제 윈도우 메시지 반영을 위한 지연 시간
+        import time
+        time.sleep(0.15)
+        
+        # 프로세스 강제 종료
+        os._exit(0)
+
+    def run(self):
+        # 1. 백그라운드 Tkinter 루트 창 생성 및 숨김
+        self.root = tk.Tk()
+        self.root.withdraw() # 메인 루프 관리를 하되 보이지 않게 처리
+        
+        # 2. 메인 루프 진입 직후(100ms 후) 컴포넌트들을 안전하게 초기화
+        # 레이스 컨디션(메인 루프 기동 전 이벤트 트리거로 인한 RuntimeError) 방지
+        self.root.after(100, self.setup_app_components)
+        
+        # 3. Tkinter 메인 루프 돌입
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.exit_app()
+
+    def add_to_startup(self):
+        """
+        현재 실행 중인 실행 파일(.exe) 또는 스크립트 파일을 윈도우 시작 시 자동 실행되도록 레지스트리에 등록합니다.
+        """
+        try:
+            # sys.frozen이 True이면 PyInstaller로 빌드된 단일 실행 파일(.exe) 상태임
+            if getattr(sys, 'frozen', False):
+                # 실행 중인 exe의 절대 경로
+                exe_path = os.path.abspath(sys.executable)
+            else:
+                # 파이썬 개발 스크립트로 실행 중인 경우 레지스트리 등록 생략
+                return
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            # 레지스트리 쓰기 모드로 오픈 (HKCU는 관리자 권한이 불필요함)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            # "PrivacyMasker"라는 이름으로 exe 경로 등록 (따옴표로 경로 감싸기)
+            winreg.SetValueEx(key, "PrivacyMasker", 0, winreg.REG_SZ, f'"{exe_path}"')
+            winreg.CloseKey(key)
+            print(f"윈도우 시작 프로그램에 자동 등록되었습니다: {exe_path}")
+        except Exception as e:
+            print(f"시작 프로그램 레지스트리 등록 중 예외 발생: {e}")
+
+    def setup_app_components(self):
+        """
+        Tkinter mainloop이 구동된 직후 안전하게 트레이 아이콘과 단축키 리스너를 켭니다.
+        """
+        # 0. 윈도우 시작 프로그램 레지스트리 자동 등록
+        self.add_to_startup()
+
+        # 1. 시스템 트레이 시작
+        self.start_tray()
+        
+        # 2. 전역 단축키 수신 리스너 등록
+        # 단축키 조합을 F9 단독 입력('<f9>')으로 변경
+        self.keyboard_listener = keyboard.GlobalHotKeys({
+            '<f9>': self.on_hotkey_triggered
+        })
+        self.keyboard_listener.start()
+        
+        # 3. 콘솔 상태 출력
+        print("==========================================================")
+        print("개인정보 마스킹 화면 캡처 프로그램이 구동되었습니다.")
+        print("- 캡처 단축키: [ F9 ]")
+        print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
+        print("==========================================================")
+
+
+if __name__ == "__main__":
+    app = PrivacyMaskerApp()
+    app.run()
