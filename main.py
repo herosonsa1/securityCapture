@@ -148,7 +148,8 @@ class PrivacyMaskerApp:
             original_image.save(temp_in_path)
             
             # 2. OCR 수행
-            ocr_result = run_ocr(temp_in_path)
+            ocr_engine = config.get("ocr_engine", "windows")
+            ocr_result = run_ocr(temp_in_path, engine=ocr_engine)
             
             # 임시 파일 백그라운드 안전 삭제
             def safe_remove(path):
@@ -231,6 +232,16 @@ class PrivacyMaskerApp:
         if self.tray_icon:
             self.tray_icon.update_menu()
 
+    def change_ocr_engine(self, engine_name):
+        """
+        트레이 아이콘의 'OCR 엔진 변경' 메뉴 선택 시 엔진 설정을 업데이트하고 저장합니다.
+        """
+        self.config = load_config()
+        self.config["ocr_engine"] = engine_name
+        save_config(self.config)
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+
     def open_last_capture_editor(self):
         """
         가장 최근에 캡처한 이미지 데이터를 복원하여 편집창을 강제 개시합니다.
@@ -267,6 +278,11 @@ class PrivacyMaskerApp:
             pystray.MenuItem("화면 캡처 (F9)", lambda icon, item: self.on_hotkey_triggered(), default=True),
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("OCR 엔진 변경", pystray.Menu(
+                pystray.MenuItem("Windows OCR (기본)", lambda item: self.change_ocr_engine("windows"), checked=lambda item: self.config.get("ocr_engine", "windows") == "windows"),
+                pystray.MenuItem("EasyOCR (딥러닝)", lambda item: self.change_ocr_engine("easyocr"), checked=lambda item: self.config.get("ocr_engine", "windows") == "easyocr")
+            )),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(

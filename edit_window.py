@@ -44,6 +44,9 @@ class EditWindow:
         # 캡처 후 편집창 항상 열기 옵션
         self.show_editor_opt = self.config.get("show_editor", True)
         
+        # OCR 엔진 설정: "windows" 또는 "easyocr"
+        self.ocr_engine = self.config.get("ocr_engine", "windows")
+        
         # OCR 결과 캐시 (이름 마스킹 방식 변경 시 실시간 재사용)
         self.ocr_result_cache = None
         
@@ -64,6 +67,7 @@ class EditWindow:
         temp_dir = tempfile.gettempdir()
         temp_img_path = os.path.join(temp_dir, f"temp_ocr_{uuid.uuid4().hex}.png")
         self.original_image.save(temp_img_path)
+        self.temp_img_path = temp_img_path
         
         # 2. Tkinter Toplevel 창 설정 (이미지 크기에 맞게 생성)
         self.root = tk.Toplevel(self.parent)
@@ -184,6 +188,25 @@ class EditWindow:
         )
         chk_show_editor.pack(side="left", padx=15)
         
+        # 1-4. OCR 엔진 설정 라디오 버튼
+        self.ocr_engine_var = tk.StringVar(value=self.ocr_engine)
+        ocr_frame = tk.LabelFrame(options_bar, text="OCR 엔진", fg="#e0e0e0", bg="#1e1e1e", bd=1, font=("맑은 고딕", 9))
+        ocr_frame.pack(side="left", padx=10)
+        
+        rb_ocr_windows = tk.Radiobutton(
+            ocr_frame, text="Windows (기본)", variable=self.ocr_engine_var, value="windows",
+            command=self.on_ocr_engine_change, fg="#e0e0e0", bg="#1e1e1e", selectcolor="#2d2d2d",
+            activeforeground="#ffffff", activebackground="#1e1e1e"
+        )
+        rb_ocr_windows.pack(side="left", padx=5, pady=2)
+        
+        rb_ocr_easyocr = tk.Radiobutton(
+            ocr_frame, text="EasyOCR (딥러닝)", variable=self.ocr_engine_var, value="easyocr",
+            command=self.on_ocr_engine_change, fg="#e0e0e0", bg="#1e1e1e", selectcolor="#2d2d2d",
+            activeforeground="#ffffff", activebackground="#1e1e1e"
+        )
+        rb_ocr_easyocr.pack(side="left", padx=5, pady=2)
+        
         # --- 2단: 액션 버튼 모음 ---
         btn_style = {
             "font": ("맑은 고딕", 9, "bold"),
@@ -226,7 +249,12 @@ class EditWindow:
         이를 통해 사용자가 캡처 즉시 [취소/닫기]를 눌러도 딜레이 없이 창이 0.001초만에 즉시 닫힙니다.
         """
         def ocr_worker():
-            ocr_result = run_ocr(temp_img_path)
+            # 사용자가 EasyOCR을 로딩할 때 최초 실행 시 라이브러리 및 모델 가중치 다운로드로 수 초 소요됨을 알림
+            if self.ocr_engine == "easyocr":
+                self.root.after(0, lambda: self.info_label.config(
+                    text="[EasyOCR] 딥러닝 모델 최초 로드 및 분석 중... (최초 로드 시 수 초 소요)", fg="#ffcc00"
+                ))
+            ocr_result = run_ocr(temp_img_path, engine=self.ocr_engine)
             # 메인 스레드 Tcl 컨텍스트로 콜백 연동 (창이 살아있는 상태에서만 수행)
             if self.root:
                 try:
@@ -578,3 +606,35 @@ class EditWindow:
         if self.root:
             self.root.destroy()
             self.root = None
+
+    def on_ocr_engine_change(self):
+        """
+        OCR 엔진 라디오 버튼 변경 시 설정을 저장하고, 백그라운드에서 다시 OCR 및 마스킹을 수행하여 화면에 반영합니다.
+        """
+        new_engine = self.ocr_engine_var.get()
+        if new_engine == self.ocr_engine:
+            return
+            
+        self.ocr_engine = new_engine
+        self.config["ocr_engine"] = self.ocr_engine
+        save_config(self.config)
+        
+        # 분석 상태 메시지 변경
+        self.info_label.config(text="새로운 OCR 엔진으로 분석을 시작합니다. 잠시만 기다려주세요...", fg="#e0e0e0")
+        self.root.update()
+        
+        # 기존 마스킹 상자 및 결과 캐시 초기화
+        self.mask_boxes = []
+        self.label_boxes = []
+        self.ocr_result_cache = None
+        self.redraw_canvas()
+        
+        # 임시 이미지 파일이 지워졌다면 재성성
+        if not os.path.exists(self.temp_img_path):
+            try:
+                self.original_image.save(self.temp_img_path)
+            except Exception as e:
+                print(f"임시 파일 재성성 실패: {e}")
+                
+        # 비동기 OCR 다시 개시
+        self.async_ocr_and_mask(self.temp_img_path)

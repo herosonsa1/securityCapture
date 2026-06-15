@@ -227,13 +227,63 @@ def verify_rrn_checksum(digits_only):
     return True
 
 
-def run_ocr(image_path):
+_easyocr_reader = None
+
+def get_easyocr_reader():
+    """
+    EasyOCR Reader의 싱글톤 인스턴스를 반환합니다.
+    최초 호출 시 메모리에 로드하고, 학습된 한글/영어 모델 가중치를 로드합니다.
+    """
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        # CPU 환경에서 동작 설정 (gpu=False)
+        _easyocr_reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
+    return _easyocr_reader
+
+def run_easy_ocr_engine(image_path):
+    """
+    EasyOCR 엔진을 사용하여 단어 인식 결과를 추출하고, 
+    기존 Windows OCR 포맷인 {"status": "success", "words": [...]} 형태로 정규화하여 반환합니다.
+    """
+    try:
+        reader = get_easyocr_reader()
+        # image_path에 해당하는 이미지 로드 후 텍스트 및 바운딩 박스 검출
+        results = reader.readtext(image_path)
+        words = []
+        for bbox, text, conf in results:
+            x_coords = [p[0] for p in bbox]
+            y_coords = [p[1] for p in bbox]
+            min_x = min(x_coords)
+            max_x = max(x_coords)
+            min_y = min(y_coords)
+            max_y = max(y_coords)
+            
+            words.append({
+                "text": text.strip(),
+                "x": int(min_x),
+                "y": int(min_y),
+                "width": int(max_x - min_x),
+                "height": int(max_y - min_y)
+            })
+            
+        return {"status": "success", "words": words}
+    except Exception as e:
+        print(f"EasyOCR 구동 중 실패: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def run_ocr(image_path, engine="windows"):
+
     """
     Windows 내장 OCR 엔진의 인식률을 극대화하기 위해 이미지를 고품질로 4배 스케일업(Scale-up)하고,
     [autocontrast → UnsharpMask 선명화 → Otsu 근사 자동 임계값 이진화] 다단계 전처리를 거친 뒤
     PowerShell OCR을 호출합니다. 획득한 단어 좌표계를 원래 해상도에 맞춰 스케일다운 보정하여 반환합니다.
     OCR 인식 결과 단어가 5개 미만인 경우(어두운 배경 등 이진화 실패 의심), 이미지 반전 후 2단계 재시도합니다.
     """
+    if engine == "easyocr":
+        return run_easy_ocr_engine(image_path)
+
     import tempfile
 
     scale_factor = 4.0  # 3.5 → 4.0: 소형 글자 및 저해상도 캡처 인식률 향상
