@@ -265,6 +265,13 @@ class PrivacyMaskerApp:
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
             pystray.Menu.SEPARATOR,
+            # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
+            pystray.MenuItem(
+                "윈도우 시작 시 자동 실행",
+                self.toggle_startup,
+                checked=lambda item: self.is_in_startup()
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("종료", lambda icon, item: self.root.after(0, self.exit_app))
         )
         
@@ -342,36 +349,110 @@ class PrivacyMaskerApp:
         except KeyboardInterrupt:
             self.exit_app()
 
+    # ── 시작 프로그램 레지스트리 관리 메서드 ────────────────────────────────
+    _REG_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _REG_VALUE_NAME = "PrivacyMasker"
+
+    def _get_exe_path(self):
+        """
+        현재 실행 중인 EXE 경로를 반환합니다. (PyInstaller 빌드 EXE 전용)
+        개발 스크립트 실행 중이면 None을 반환합니다.
+        """
+        if getattr(sys, 'frozen', False):
+            return os.path.abspath(sys.executable)
+        return None
+
+    def is_in_startup(self):
+        """
+        현재 실행 파일이 윈도우 시작 프로그램에 등록되어 있는지 확인합니다.
+        """
+        exe_path = self._get_exe_path()
+        if not exe_path:
+            return False
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, self._REG_KEY_PATH, 0, winreg.KEY_READ
+            )
+            val, _ = winreg.QueryValueEx(key, self._REG_VALUE_NAME)
+            winreg.CloseKey(key)
+            # 등록된 경로가 현재 EXE와 일치하는지 확인 (경로 정규화 비교)
+            registered_path = val.strip('"')
+            return os.path.normcase(registered_path) == os.path.normcase(exe_path)
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"시작 프로그램 등록 여부 조회 중 예외: {e}")
+            return False
+
     def add_to_startup(self):
         """
-        현재 실행 중인 실행 파일(.exe) 또는 스크립트 파일을 윈도우 시작 시 자동 실행되도록 레지스트리에 등록합니다.
+        현재 실행 파일(.exe)을 윈도우 시작 프로그램에 등록합니다.
         """
+        exe_path = self._get_exe_path()
+        if not exe_path:
+            # 개발 스크립트 실행 중이면 등록 생략
+            return False
         try:
-            # sys.frozen이 True이면 PyInstaller로 빌드된 단일 실행 파일(.exe) 상태임
-            if getattr(sys, 'frozen', False):
-                # 실행 중인 exe의 절대 경로
-                exe_path = os.path.abspath(sys.executable)
-            else:
-                # 파이썬 개발 스크립트로 실행 중인 경우 레지스트리 등록 생략
-                return
-
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            # 레지스트리 쓰기 모드로 오픈 (HKCU는 관리자 권한이 불필요함)
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-            # "PrivacyMasker"라는 이름으로 exe 경로 등록 (따옴표로 경로 감싸기)
-            winreg.SetValueEx(key, "PrivacyMasker", 0, winreg.REG_SZ, f'"{exe_path}"')
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, self._REG_KEY_PATH, 0, winreg.KEY_SET_VALUE
+            )
+            winreg.SetValueEx(key, self._REG_VALUE_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
             winreg.CloseKey(key)
-            print(f"윈도우 시작 프로그램에 자동 등록되었습니다: {exe_path}")
+            print(f"윈도우 시작 프로그램 등록 완료: {exe_path}")
+            return True
         except Exception as e:
-            print(f"시작 프로그램 레지스트리 등록 중 예외 발생: {e}")
+            print(f"시작 프로그램 등록 중 예외: {e}")
+            return False
+
+    def remove_from_startup(self):
+        """
+        윈도우 시작 프로그램에서 현재 실행 파일 등록을 해제합니다.
+        """
+        exe_path = self._get_exe_path()
+        if not exe_path:
+            return False
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, self._REG_KEY_PATH, 0, winreg.KEY_SET_VALUE
+            )
+            winreg.DeleteValue(key, self._REG_VALUE_NAME)
+            winreg.CloseKey(key)
+            print("윈도우 시작 프로그램 등록 해제 완료")
+            return True
+        except FileNotFoundError:
+            print("시작 프로그램에 등록된 항목이 없음 (이미 해제 상태)")
+            return True
+        except Exception as e:
+            print(f"시작 프로그램 해제 중 예외: {e}")
+            return False
+
+    def toggle_startup(self, icon, item):
+        """
+        트레이 메뉴에서 '시작 프로그램 등록' 항목 클릭 시 등록/해제를 토글합니다.
+        """
+        if self.is_in_startup():
+            ok = self.remove_from_startup()
+            if self.tray_icon:
+                msg = "시작 프로그램 등록이 해제되었습니다." if ok else "등록 해제에 실패했습니다."
+                try:
+                    self.tray_icon.notify(msg, "개인정보마스킹")
+                except Exception:
+                    pass
+        else:
+            ok = self.add_to_startup()
+            if self.tray_icon:
+                msg = "시작 프로그램에 등록되었습니다.\n다음 로그인부터 자동으로 실행됩니다." if ok else "등록에 실패했습니다."
+                try:
+                    self.tray_icon.notify(msg, "개인정보마스킹")
+                except Exception:
+                    pass
+        if self.tray_icon:
+            self.tray_icon.update_menu()
 
     def setup_app_components(self):
         """
         Tkinter mainloop이 구동된 직후 안전하게 트레이 아이콘과 단축키 리스너를 켭니다.
         """
-        # 0. 윈도우 시작 프로그램 레지스트리 자동 등록
-        self.add_to_startup()
-
         # 1. 시스템 트레이 시작
         self.start_tray()
         
@@ -382,10 +463,24 @@ class PrivacyMaskerApp:
         })
         self.keyboard_listener.start()
         
-        # 3. 콘솔 상태 출력
+        # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
+        # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
+        if getattr(sys, 'frozen', False) and not self.is_in_startup():
+            if self.add_to_startup():
+                try:
+                    self.tray_icon.notify(
+                        "시작 프로그램에 자동 등록되었습니다.\n"
+                        "해제하려면 트레이 메뉴 → '윈도우 시작 시 자동 실행'을 클릭하세요.",
+                        "개인정보마스킹"
+                    )
+                except Exception:
+                    pass
+
+        # 4. 콘솔 상태 출력
         print("==========================================================")
         print("개인정보 마스킹 화면 캡처 프로그램이 구동되었습니다.")
         print("- 캡처 단축키: [ F9 ]")
+        print("- 트레이 메뉴에서 '윈도우 시작 시 자동 실행' 등록/해제 가능")
         print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
         print("==========================================================")
 

@@ -33,19 +33,11 @@ def build():
         '--clean'
     ])
     
-    # register_startup.bat 파일을 dist 폴더로 복사
-    bat_file = "register_startup.bat"
-    if os.path.exists(bat_file):
-        try:
-            shutil.copy(bat_file, "dist")
-            print(f"{bat_file} 파일을 dist 폴더로 복사했습니다.")
-        except Exception as e:
-            print(f"{bat_file} 파일 복사 중 실패: {e}")
-            
     print("\n==============================================")
     print("빌드가 성공적으로 완료되었습니다!")
-    print("생성된 실행 파일 경로: dist\\PrivacyMasker.exe")
-    print("및 복사된 설정 파일: dist\\register_startup.bat")
+    print("배포 파일: dist\\PrivacyMasker.exe  (단독 배포 — 추가 파일 불필요)")
+    print("  · 최초 실행 시 자동으로 시작 프로그램에 등록됩니다.")
+    print("  · 해제: 트레이 아이콘 우클릭 → '윈도우 시작 시 자동 실행' 클릭")
     print("==============================================")
 
 if __name__ == "__main__":
