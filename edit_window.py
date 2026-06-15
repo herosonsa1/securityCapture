@@ -60,8 +60,9 @@ class EditWindow:
 
     def show(self):
         # 1. OCR 엔진 백그라운드 구동을 위해 임시 저장
+        import uuid
         temp_dir = tempfile.gettempdir()
-        temp_img_path = os.path.join(temp_dir, "temp_ocr_target.png")
+        temp_img_path = os.path.join(temp_dir, f"temp_ocr_{uuid.uuid4().hex}.png")
         self.original_image.save(temp_img_path)
         
         # 2. Tkinter Toplevel 창 설정 (이미지 크기에 맞게 생성)
@@ -491,8 +492,9 @@ class EditWindow:
         final_img = self.get_final_masked_image()
         
         # 임시 이미지 파일로 세이브
+        import uuid
         temp_dir = tempfile.gettempdir()
-        temp_out_path = os.path.join(temp_dir, "temp_copied_capture.png")
+        temp_out_path = os.path.join(temp_dir, f"temp_copied_capture_{uuid.uuid4().hex}.png")
         final_img.save(temp_out_path)
         
         # PowerShell 백그라운드 구동으로 .NET 클립보드 이미지 세팅

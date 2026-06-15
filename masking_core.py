@@ -269,12 +269,19 @@ def run_ocr(image_path):
                 threshold = t
         return threshold
 
+    border_crop = 4  # 대비 왜곡을 방지하기 위한 가장자리 테두리(검은 선 등) 크롭 여백
+
     def preprocess_and_save(img_pil, invert=False):
         """
         이미지를 전처리(스케일업, autocontrast, UnsharpMask)한 후
         임시 파일로 저장하고 경로를 반환합니다. 이진화 과정은 이미지 깨짐을 방지하기 위해 수행하지 않습니다.
         invert=True이면 그레이스케일 이미지를 반전시켜 어두운 배경에 밝은 글자 환경을 보정합니다.
         """
+        # 가장자리 테두리(검은 선 등)가 autocontrast 명암 히스토그램 조정을 방해하지 않도록
+        # 4px만큼 사방을 크롭하여 글자 부분 명암비 확장에 집중시킵니다.
+        if img_pil.width > border_crop * 2 and img_pil.height > border_crop * 2:
+            img_pil = img_pil.crop((border_crop, border_crop, img_pil.width - border_crop, img_pil.height - border_crop))
+
         new_w = int(img_pil.width * scale_factor)
         new_h = int(img_pil.height * scale_factor)
         # LANCZOS 필터로 고품질 확대 (픽셀 깨짐, 계단 현상 방지)
@@ -390,14 +397,28 @@ def run_ocr(image_path):
             except:
                 pass
 
-    # 확대 비율(scale_factor)에 맞춰 단어들의 좌표계를 원상 복구 (Scale-down)
-    if ocr_result.get("status") == "success" and scale_factor > 1.0:
+    # 확대 비율(scale_factor) 및 크롭(border_crop) 오프셋을 적용해 단어들의 좌표계를 원상 복구 (Scale-down & Shift-back)
+    if ocr_result.get("status") == "success":
         words = ocr_result.get("words", [])
+        
+        has_border = False
+        try:
+            if os.path.exists(image_path):
+                with Image.open(image_path) as orig_img:
+                    if orig_img.width > border_crop * 2 and orig_img.height > border_crop * 2:
+                        has_border = True
+        except:
+            pass
+
         for w in words:
-            w['x'] = int(w['x'] / scale_factor)
-            w['y'] = int(w['y'] / scale_factor)
-            w['width'] = int(w['width'] / scale_factor)
-            w['height'] = int(w['height'] / scale_factor)
+            if scale_factor > 1.0:
+                w['x'] = int(w['x'] / scale_factor)
+                w['y'] = int(w['y'] / scale_factor)
+                w['width'] = int(w['width'] / scale_factor)
+                w['height'] = int(w['height'] / scale_factor)
+            if has_border:
+                w['x'] += border_crop
+                w['y'] += border_crop
 
     return ocr_result
 
@@ -646,7 +667,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
     """
     NAME_LABELS = {
         "성명", "민원인성명", "고객명", "이름", "대표자", "대표자명", "성 명", "민원인 성명",
-        "보회자", "피보험자", "피보험자명", "인원인", "인원점수번호", "보회자Q卜", "보회云|략", "피보"
+        "보회자", "피보험자", "피보험자명", "인원인", "인원점수번호", "보회자Q卜", "보회云|략", "피보",
+        "운전자", "운전자명"
     }
     RRN_LABELS = {
         "주민등록번호", "주민번호", "실명번호", "외국인등록번호", "등록번호", "주민등록 번호",
@@ -657,10 +679,10 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
         "휴대폰번호", "휴대폰", "연락처", "전화번호", "핸드폰", "이동전화", "휴대폰 번호", "전화 번호",
         "폰번", "폰번호", "핸드폰번호", "폰 번", "연력처", "연락", "연력", "인락처", "연락저", "연락처*"
     }
-    DRIVER_LABELS = {"운전면허번호", "운전면허", "면허번호", "면허", "운전"}
+    DRIVER_LABELS = {"운전면허번호", "운전면허", "면허번호", "면허"}
     PASSPORT_LABELS = {"여권번호", "여권"}
     EMAIL_LABELS = {"이메일주소", "이메일", "E-Mail", "email", "이매일", "인터넷주소", "메일주소", "메일"}
-    ADDRESS_LABELS = {"주소", "소재지", "주 소"}
+    ADDRESS_LABELS = {"주소", "소재지", "주 소", "사고장소", "사고지", "장소", "주소지"}
     CARD_LABELS = {"신용카드", "카드번호", "카드"}
     BANK_LABELS = {"계좌번호", "계좌"}
     IP_LABELS = {"IP주소", "IP", "아이피"}
@@ -763,11 +785,13 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
         # (결합 키워드, 레이블_타입)
         ("민원인성명", "name"), ("민원인", "name"), ("인성명", "name"),
         ("고객성명", "name"), ("보험계약자", "name"), ("피보험자명", "name"),
+        ("운전자명", "name"), ("운전자", "name"),
         ("주민등록번호", "rrn"), ("주민번호", "rrn"), ("외국인등록번호", "rrn"),
         ("휴대폰번호", "phone"), ("전화번호", "phone"), ("핸드폰번호", "phone"),
         ("생년월일", "birth"), ("출생년월일", "birth"),
         ("여권번호", "passport"), ("운전면허번호", "driver"),
         ("이메일주소", "email"),
+        ("사고장소", "address"), ("사고지", "address"), ("장소", "address"),
     ]
 
     # Y 기준으로 행 그룹화
@@ -819,6 +843,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
 
     for word in words:
         text_clean = re.sub(r'\s+', '', word['text'])
+        # 특수문자(*, :, ?, [, ] 등)를 제거한 순수 한글/영어/숫자 기준 텍스트
+        text_stripped = re.sub(r'[^가-힣a-zA-Z0-9]', '', text_clean)
 
         matched_label_type = None
 
@@ -827,53 +853,53 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             matched_label_type = word.get('_pre_label_type')
 
         # 1. 성명 레이블 판정 완화 (오인식 오타 대응)
-        elif any(lbl in text_clean for lbl in NAME_LABELS) or (
-            "민원" in text_clean and "성" in text_clean) or (
-            "성" in text_clean and "명" in text_clean) or (
-            "보회" in text_clean) or (
-            "인원" in text_clean and "성" in text_clean) or (
-            "인성" in text_clean) or (
-            text_clean.endswith("명") and len(text_clean) >= 2):
+        elif any(lbl in text_stripped for lbl in NAME_LABELS) or (
+            "민원" in text_stripped and "성" in text_stripped) or (
+            "성" in text_stripped and "명" in text_stripped) or (
+            "보회" in text_stripped) or (
+            "인원" in text_stripped and "성" in text_stripped) or (
+            "인성" in text_stripped) or (
+            text_stripped.endswith("명") and len(text_stripped) >= 2):
             matched_label_type = "name"
 
         # 2. 주민번호 레이블 판정 완화 (오인식 오타 대응 및 유사성 결합 매칭)
-        elif (any(lbl in text_clean for lbl in RRN_LABELS) or
-              ("주민" in text_clean and "번호" in text_clean) or
-              ("등록" in text_clean and "번호" in text_clean) or
-              ("주원" in text_clean) or ("들릨" in text_clean) or ("릨ä" in text_clean) or
-              ("주인" in text_clean and "변호" in text_clean) or
-              ("주" in text_clean and ("번호" in text_clean or "변호" in text_clean or "호" in text_clean)) or
-              ("등록" in text_clean and ("번호" in text_clean or "변호" in text_clean or "호" in text_clean))):
-            if "접수" not in text_clean and "제휴" not in text_clean:
+        elif (any(lbl in text_stripped for lbl in RRN_LABELS) or
+              ("주민" in text_stripped and "번호" in text_stripped) or
+              ("등록" in text_stripped and "번호" in text_stripped) or
+              ("주원" in text_stripped) or ("들릨" in text_stripped) or ("릨ä" in text_stripped) or
+              ("주인" in text_stripped and "변호" in text_stripped) or
+              ("주" in text_stripped and ("번호" in text_stripped or "변호" in text_stripped or "호" in text_stripped)) or
+              ("등록" in text_stripped and ("번호" in text_stripped or "변호" in text_stripped or "호" in text_stripped))):
+            if "접수" not in text_stripped and "제휴" not in text_stripped:
                 matched_label_type = "rrn"
 
         # 3. 휴대폰 레이블 판정 완화 (오인식 오타 대응)
-        elif any(lbl in text_clean for lbl in PHONE_LABELS) or (
-            "휴대" in text_clean and "번호" in text_clean) or (
-            "휴대" in text_clean and "폰" in text_clean) or (
-            "전화" in text_clean and "번호" in text_clean) or (
-            "폰번" in text_clean):
-            if "접수" not in text_clean and "제휴" not in text_clean:
+        elif any(lbl in text_stripped for lbl in PHONE_LABELS) or (
+            "휴대" in text_stripped and "번호" in text_stripped) or (
+            "휴대" in text_stripped and "폰" in text_stripped) or (
+            "전화" in text_stripped and "번호" in text_stripped) or (
+            "폰번" in text_stripped):
+            if "접수" not in text_stripped and "제휴" not in text_stripped:
                 matched_label_type = "phone"
         # 4. 생년월일 레이블 판정 (신규 추가)
-        elif any(lbl in text_clean for lbl in BIRTH_LABELS) or (
-            "생년" in text_clean and ("월" in text_clean or "일" in text_clean)):
+        elif any(lbl in text_stripped for lbl in BIRTH_LABELS) or (
+            "생년" in text_stripped and ("월" in text_stripped or "일" in text_stripped)):
             matched_label_type = "birth"
-        elif any(lbl in text_clean for lbl in DRIVER_LABELS):
+        elif any(lbl in text_stripped for lbl in DRIVER_LABELS):
             matched_label_type = "driver"
-        elif any(lbl in text_clean for lbl in PASSPORT_LABELS):
+        elif any(lbl in text_stripped for lbl in PASSPORT_LABELS):
             matched_label_type = "passport"
-        elif any(lbl in text_clean for lbl in EMAIL_LABELS):
+        elif any(lbl in text_stripped for lbl in EMAIL_LABELS):
             matched_label_type = "email"
-        elif any(lbl in text_clean for lbl in ADDRESS_LABELS):
+        elif any(lbl in text_stripped for lbl in ADDRESS_LABELS):
             matched_label_type = "address"
-        elif any(lbl in text_clean for lbl in CARD_LABELS):
+        elif any(lbl in text_stripped for lbl in CARD_LABELS):
             matched_label_type = "card"
-        elif any(lbl in text_clean for lbl in BANK_LABELS):
+        elif any(lbl in text_stripped for lbl in BANK_LABELS):
             matched_label_type = "bank"
-        elif any(lbl in text_clean for lbl in IP_LABELS):
+        elif any(lbl in text_stripped for lbl in IP_LABELS):
             matched_label_type = "ip"
-        elif any(lbl in text_clean for lbl in VEHICLE_LABELS):
+        elif any(lbl in text_stripped for lbl in VEHICLE_LABELS):
             matched_label_type = "vehicle"
 
         if not matched_label_type:
@@ -1406,10 +1432,19 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             for other in words:
                 if other.get('_idx') == word.get('_idx'):
                     continue
-                # 레이블과 같은 행(또는 하단 근접 행)에 있고, 레이블 우측에 있는 단어
-                if abs(other['y'] - word['y']) <= y_tolerance_addr:
-                    if other['x'] > word['x'] + word['width'] * 0.5:
-                        addr_candidates.append(other)
+                # 레이블과 같은 행(또는 하단 근접 행)에 있고, 레이블 우측 또는 하단에 있는 단어
+                # 레이블보다 현저히 위쪽 줄(height의 0.5배 위)에 있는 단어는 제외하여 오탐 방지
+                y_diff = other['y'] - word['y']
+                if -word['height'] * 0.5 <= y_diff <= y_tolerance_addr:
+                    # 같은 행일 때: 레이블 우측 (레이블 폭의 절반 이상 오른쪽에 있는 것)
+                    # 다른 행(하단 행)일 때: 레이블 시작 위치 대비 약간 왼쪽(x-150)까지 포함하여 다음 줄에 시작하는 주소 수집
+                    is_same_row = abs(y_diff) <= max(word['height'] * 0.8, 12)
+                    if is_same_row:
+                        if other['x'] > word['x'] + word['width'] * 0.5:
+                            addr_candidates.append(other)
+                    else:
+                        if other['x'] > word['x'] - 150:
+                            addr_candidates.append(other)
                         
             addr_candidates.sort(key=lambda c: (c['y'], c['x']))
             

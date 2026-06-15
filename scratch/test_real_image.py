@@ -88,5 +88,39 @@ def run_simulated_tests():
     for m in mask_5:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
 
+    # 시나리오 6: 운전자 이름 및 사고장소 마스킹 검증
+    # [운전자] [본인] [이준희] / [사고장소] [부산 남구 대연3동] [54-1 경성대 부근]
+    print("\n[시나리오 6] 운전자 및 사고장소 레이블 감지")
+    words_6 = [
+        {"text": "운전자", "x": 10, "y": 500, "width": 40, "height": 20},
+        {"text": "본인", "x": 60, "y": 500, "width": 30, "height": 20},
+        {"text": "이준희", "x": 100, "y": 500, "width": 45, "height": 20},
+        {"text": "사고장소", "x": 10, "y": 530, "width": 50, "height": 20},
+        {"text": "부산 남구 대연3동", "x": 70, "y": 530, "width": 120, "height": 20},
+        {"text": "54-1 경성대 부근", "x": 200, "y": 530, "width": 100, "height": 20}
+    ]
+    ocr_res_6 = {"status": "success", "words": words_6}
+    mask_6, label_6 = detect_personal_info(ocr_res_6)
+    
+    print("  * 감지된 마스킹 영역 수:", len(mask_6))
+    for m in mask_6:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
+    # 시나리오 7: 주소가 레이블보다 한 줄 밑(아래 행)에 있고 레이블 시작점보다 약간 왼쪽에서 시작하는 수직 레이아웃
+    # [사고장소] 
+    # [부산 남구 대연3동] [54-1 경성대 부근]
+    print("\n[시나리오 7] 사고장소 수직 레이아웃 (아래 행 주소 시작)")
+    words_7 = [
+        {"text": "사고장소", "x": 100, "y": 600, "width": 50, "height": 20},
+        {"text": "부산 남구 대연3동", "x": 20, "y": 630, "width": 120, "height": 20},
+        {"text": "54-1 경성대 부근", "x": 150, "y": 630, "width": 100, "height": 20}
+    ]
+    ocr_res_7 = {"status": "success", "words": words_7}
+    mask_7, label_7 = detect_personal_info(ocr_res_7)
+    
+    print("  * 감지된 마스킹 영역 수:", len(mask_7))
+    for m in mask_7:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
 if __name__ == "__main__":
     run_simulated_tests()

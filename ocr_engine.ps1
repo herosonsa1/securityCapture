@@ -1,4 +1,4 @@
-﻿Param(
+Param(
     [string]$ImagePath
 )
 
@@ -118,4 +118,17 @@ try {
         trace   = $_.ScriptStackTrace
     }
     $errObj | ConvertTo-Json -Compress
+} finally {
+    # 열려있는 스트림과 비트맵 리소스 안전하게 해제 (파일 점유 락 예방)
+    if ($null -ne $stream) {
+        try {
+            $stream.Close()
+            $stream.Dispose()
+        } catch {}
+    }
+    if ($null -ne $bitmap) {
+        try {
+            $bitmap.Dispose()
+        } catch {}
+    }
 }

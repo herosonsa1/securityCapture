@@ -122,6 +122,7 @@ class PrivacyMaskerApp:
             import tempfile
             import os
             import subprocess
+            import uuid
             from masking_core import run_ocr, detect_personal_info, apply_mask
             from config_manager import load_config
             
@@ -138,9 +139,11 @@ class PrivacyMaskerApp:
             mask_type = config.get("mask_type", "mosaic")
             name_mask_style = config.get("name_mask_style", "middle")
             
+            unique_id = uuid.uuid4().hex
+            
             # 1. OCR 대상 이미지를 임시 저장
             temp_dir = tempfile.gettempdir()
-            temp_in_path = os.path.join(temp_dir, "temp_bg_ocr_target.png")
+            temp_in_path = os.path.join(temp_dir, f"temp_bg_ocr_{unique_id}.png")
             original_image = crop_area["image"]
             original_image.save(temp_in_path)
             
@@ -174,7 +177,7 @@ class PrivacyMaskerApp:
             final_img = apply_mask(original_image, mask_boxes, mask_type=mask_type, mosaic_size=10)
             
             # 5. 클립보드 복사용 임시 세이브
-            temp_out_path = os.path.join(temp_dir, "temp_bg_copied_capture.png")
+            temp_out_path = os.path.join(temp_dir, f"temp_bg_copied_capture_{unique_id}.png")
             final_img.save(temp_out_path)
             
             # 6. PowerShell .NET 호출을 통한 이미지 픽셀 데이터 클립보드 복사
@@ -283,6 +286,17 @@ class PrivacyMaskerApp:
         )
         # 트레이 아이콘을 백그라운드 스레드에서 구동
         self.tray_icon.run_detached()
+        
+        # 시스템 트레이 실행 즉시 윈도우 알림 토스트 메시지 전송
+        # 캡처 후 편집창 띄우기 옵션이 꺼져(체크해제) 있을 때만 백그라운드 실행을 알리기 위해 토스트 알림을 띄웁니다.
+        if not self.config.get("show_editor", True):
+            try:
+                self.tray_icon.notify(
+                    "윈도우 시작 시 자동 기동 등록 완료! F9 를 눌러 즉시 기능을 시작할 수 있습니다.",
+                    "개인정보마스킹 실행 중"
+                )
+            except Exception as e:
+                print(f"알림 팝업 전송 실패: {e}")
 
     def exit_app(self):
         """
@@ -452,28 +466,18 @@ class PrivacyMaskerApp:
         })
         self.keyboard_listener.start()
         
-        # 3. 시작 프로그램 관리 및 최초/상시 기동 안내 토스트 알림 전송
-        startup_added = False
+        # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
+        # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
         if getattr(sys, 'frozen', False) and not self.is_in_startup():
             if self.add_to_startup():
-                startup_added = True
-
-        # 종합 알림 메시지 구성
-        prefix = "윈도우 시작 프로그램 등록 완료!\n" if startup_added else ""
-        notice_msg = (
-            f"{prefix}"
-            "F9 키를 눌러 즉시 화면을 캡처하고, 게시판이나 문서에 바로 붙여넣기(Ctrl+V) 하실 수 있습니다.\n"
-            "마스킹 범위 등 상세 항목은 시스템 트레이 아이콘 우클릭 메뉴에서 설정 가능합니다."
-        )
-
-        if self.tray_icon:
-            try:
-                self.tray_icon.notify(
-                    notice_msg,
-                    "개인정보 마스킹 구동 중"
-                )
-            except Exception as e:
-                print(f"기동 알림 토스트 전송 실패: {e}")
+                try:
+                    self.tray_icon.notify(
+                        "시작 프로그램에 자동 등록되었습니다.\n"
+                        "해제하려면 트레이 메뉴 → '윈도우 시작 시 자동 실행'을 클릭하세요.",
+                        "개인정보마스킹"
+                    )
+                except Exception:
+                    pass
 
         # 4. 콘솔 상태 출력
         print("==========================================================")
