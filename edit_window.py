@@ -628,26 +628,52 @@ class EditWindow:
             cx = img_w // 2
             cy = img_h // 2
             
-            # 스피너 외곽 반지름
-            r = 30
+            # 더 크고 시인성이 높은 스피너 크기(반지름 45px, 지름 90px)
+            r = 45
             
             # 1. 둥근 백그라운드 트랙 회색 링
             bg_ring = self.canvas.create_oval(
                 cx - r, cy - r, cx + r, cy + r, 
-                outline="#2b2b2b", width=5
+                outline="#252525", width=4
             )
             self.spinner_items.append(bg_ring)
             
-            # 2. 회전하는 파란색 로딩 아크 (100도 가량의 호)
-            spin_arc = self.canvas.create_arc(
+            # 2. 꼬리가 흐려지는 3단계 그라데이션 아크 (역동적인 꼬리 효과)
+            # 2-1. 꼬리 부분 (어두운 블루, 40도 범위)
+            arc_tail = self.canvas.create_arc(
                 cx - r, cy - r, cx + r, cy + r,
-                start=self.spinner_angle, extent=100,
-                style="arc", outline="#007acc", width=5
+                start=(self.spinner_angle - 80) % 360, extent=40,
+                style="arc", outline="#003b66", width=4
             )
-            self.spinner_items.append(spin_arc)
+            self.spinner_items.append(arc_tail)
             
-            # 시계 방향 회전 (프레임당 12도씩 감산)
-            self.spinner_angle = (self.spinner_angle - 12) % 360
+            # 2-2. 몸통 부분 (네이비 블루, 40도 범위)
+            arc_body = self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=(self.spinner_angle - 40) % 360, extent=40,
+                style="arc", outline="#007acc", width=4
+            )
+            self.spinner_items.append(arc_body)
+            
+            # 2-3. 머리 부분 (테크 밝은 블루, 40도 범위)
+            arc_head = self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=self.spinner_angle, extent=40,
+                style="arc", outline="#00d2ff", width=4
+            )
+            self.spinner_items.append(arc_head)
+            
+            # 3. 스피너 링 정중앙에 '분석 중' 안내 텍스트 가독성 높여 렌더링
+            text_item = self.canvas.create_text(
+                cx, cy, 
+                text="분석 중", 
+                fill="#b0b0b0", 
+                font=("맑은 고딕", 9, "bold")
+            )
+            self.spinner_items.append(text_item)
+            
+            # 시계 방향 회전 (프레임당 15도로 회전 속도를 역동적으로 향상)
+            self.spinner_angle = (self.spinner_angle - 15) % 360
             
             # 30ms 지연 기법으로 자연스러운 애니메이션 루프 수행
             self.root.after(30, self.animate_spinner)
