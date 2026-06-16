@@ -502,20 +502,85 @@ class PrivacyMaskerApp:
     def show_block_warning(self):
         """
         타 캡처 단축키 입력 시 차단 안내 경고창을 표시합니다.
-        중복 팝업이 뜨지 않도록 제어합니다.
+        F9 부분을 강조하고 2줄로 깔끔하게 표현하는 커스텀 모달 다이얼로그를 사용합니다.
         """
         if getattr(self, "_warning_shown", False):
             return
         self._warning_shown = True
+
+        # 커스텀 다이얼로그 생성
+        dialog = tk.Toplevel(self.root)
+        dialog.title("캡처 사용 불가 안내")
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)  # 항상 위에 노출
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # 크기 및 중앙 배치 계산
+        win_w, win_h = 380, 160
+        screen_w = dialog.winfo_screenwidth()
+        screen_h = dialog.winfo_screenheight()
+        pos_x = (screen_w - win_w) // 2
+        pos_y = (screen_h - win_h) // 2
+        dialog.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+        # 스타일 정의
+        bg_color = "#F8F9FA"  # 부드러운 소프트 화이트
+        btn_color = "#0078D7"  # 모던 윈도우 블루
+        btn_active = "#106EBE"
         
-        # 안내 문구 팝업
-        messagebox.showwarning(
-            "캡처 사용 불가 안내",
-            "타 캡쳐프로그램은 사용 불가 합니다.\n"
-            "F9키를 사용하여 개인정보 마스킹캡쳐를 이용해 주세요.",
-            parent=self.root
+        dialog.config(bg=bg_color)
+        
+        # 내부 패딩 프레임
+        frame = tk.Frame(dialog, bg=bg_color, padx=24, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 텍스트 영역 (Rich Text 지원용 Text 위젯)
+        text_area = tk.Text(
+            frame, 
+            wrap=tk.WORD, 
+            font=("Malgun Gothic", 10), 
+            bg=bg_color, 
+            relief=tk.FLAT, 
+            highlightthickness=0, 
+            height=3, 
+            width=40
         )
-        self._warning_shown = False
+        text_area.pack(fill=tk.X, expand=True)
+
+        # 태그 정의
+        text_area.tag_configure("normal", foreground="#202124", spacing1=4)
+        text_area.tag_configure("highlight", foreground="#D93025", font=("Malgun Gothic", 11, "bold")) # 구글 에러 레드 계열
+
+        # 텍스트 삽입 (2줄)
+        text_area.insert(tk.END, "타 캡쳐프로그램은 사용 불가 합니다.\n", "normal")
+        text_area.insert(tk.END, "F9 ", "highlight")
+        text_area.insert(tk.END, "키를 사용하여 개인정보 마스킹캡쳐를 이용해 주세요.", "normal")
+        
+        text_area.config(state=tk.DISABLED)
+
+        # 닫힐 때 플래그 해제 처리
+        def on_close():
+            self._warning_shown = False
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        # 모던 버튼 구현
+        btn_style = {
+            "font": ("Malgun Gothic", 10, "bold"),
+            "fg": "white",
+            "bg": btn_color,
+            "activeforeground": "white",
+            "activebackground": btn_active,
+            "relief": tk.FLAT,
+            "cursor": "hand2",
+            "bd": 0,
+            "padx": 20,
+            "pady": 6
+        }
+        btn = tk.Button(frame, text="확인", command=on_close, **btn_style)
+        btn.pack(pady=(12, 0))
         
         # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
         # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
