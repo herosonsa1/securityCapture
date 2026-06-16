@@ -43,11 +43,6 @@ class PrivacyMaskerApp:
         self.config = load_config()
         self.last_crop_area = None
         
-        # 타 캡처프로그램 금지 스레드 및 리스너
-        self.block_thread = None
-        self.block_running = False
-        self._warning_shown = False
-        
         # 자체 복사 시 클립보드 보호 차단 우회 플래그
         self.skip_clipboard_clear = False
 
@@ -244,7 +239,6 @@ class PrivacyMaskerApp:
             pystray.MenuItem("화면 캡처 (F9)", lambda icon, item: self.on_hotkey_triggered(), default=True),
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
-            pystray.MenuItem("타 캡쳐프로그램 금지", self.toggle_block_other_captures, checked=lambda item: self.config.get("block_other_captures", False)),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(
@@ -300,9 +294,6 @@ class PrivacyMaskerApp:
             except:
                 pass
                 
-        # 2-2. 차단 리스너 및 백그라운드 스레드 정지
-        self.stop_capture_blocker()
-            
         # 3. Tkinter 루프 종료
         if self.root:
             try:
@@ -440,11 +431,11 @@ class PrivacyMaskerApp:
         # 1. 시스템 트레이 시작
         self.start_tray()
         
-        # 1-2. 타 캡처프로그램 금지 백그라운드 스레드 가동
-        self.start_capture_blocker()
-        
-        # 2. 단일 통합 전역 키보드 리스너 구동 (F9 핫키 감지 및 PrintScreen 차단 통합)
+        # 2. 단일 통합 전역 키보드 리스너 구동 (F9 핫키 감지 통합)
         self.start_keyboard_listener()
+
+        # 3. 콘솔 상태 출력
+        self.show_app_info()
 
     def start_keyboard_listener(self):
         """
@@ -454,11 +445,6 @@ class PrivacyMaskerApp:
         if self.keyboard_listener:
             return
 
-        import ctypes
-        GetAsyncKeyState = ctypes.windll.user32.GetAsyncKeyState
-        GetAsyncKeyState.argtypes = [ctypes.c_int]
-        GetAsyncKeyState.restype = ctypes.c_short
-
         def win32_filter(msg, data):
             # 1. F9 단축키 처리 (VK_F9 = 0x78)
             # WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104
@@ -466,30 +452,6 @@ class PrivacyMaskerApp:
                 if msg in (0x0100, 0x0104):
                     self.root.after(0, self.on_hotkey_triggered)
                 return False  # 시스템 전파 차단하여 핫키만 삼킴
-
-            # '타 캡쳐프로그램 금지' 설정이 활성화된 경우만 캡처 단축키 차단 처리
-            cur_cfg = load_config()
-            if cur_cfg.get("block_other_captures", False):
-                # 2. PrintScreen 차단 처리 (VK_SNAPSHOT = 0x2C)
-                if data.vkCode == 0x2C:
-                    if msg in (0x0100, 0x0104):
-                        print("[차단] Print Screen 키 입력 무효화 완료")
-                        self.root.after(0, self.show_block_warning)
-                    return False  # 시스템 전파 차단하여 캡처 방지
-
-                # 3. Windows + Shift + S 차단 처리 ('S' 키 = 0x53)
-                if data.vkCode == 0x53:
-                    # Windows 키 상태 검사 (LWIN: 0x5B, RWIN: 0x5C)
-                    win_pressed = (GetAsyncKeyState(0x5B) & 0x8000) or (GetAsyncKeyState(0x5C) & 0x8000)
-                    # Shift 키 상태 검사 (SHIFT: 0x10, LSHIFT: 0xA0, RSHIFT: 0xA1)
-                    shift_pressed = (GetAsyncKeyState(0x10) & 0x8000) or (GetAsyncKeyState(0xA0) & 0x8000) or (GetAsyncKeyState(0xA1) & 0x8000)
-                    
-                    if win_pressed and shift_pressed:
-                        if msg in (0x0100, 0x0104):
-                            print("[차단] Windows+Shift+S 단축키 입력 무효화 완료")
-                            self.root.after(0, self.show_block_warning)
-                        return False  # 시스템 전파 차단하여 캡처 방지
-
             return True
 
         try:
@@ -499,254 +461,16 @@ class PrivacyMaskerApp:
         except Exception as e:
             print(f"[Keyboard] 통합 키보드 리스너 기동 실패: {e}")
 
-    def show_block_warning(self):
+    def show_app_info(self):
         """
-        타 캡처 단축키 입력 시 차단 안내 경고창을 표시합니다.
-        F9 부분을 강조하고 2줄로 깔끔하게 표현하는 커스텀 모달 다이얼로그를 사용합니다.
+        프로그램 실행 시 콘솔 상태를 출력합니다.
         """
-        if getattr(self, "_warning_shown", False):
-            return
-        self._warning_shown = True
-
-        # 커스텀 다이얼로그 생성
-        dialog = tk.Toplevel(self.root)
-        dialog.title("캡처 사용 불가 안내")
-        dialog.resizable(False, False)
-        dialog.attributes("-topmost", True)  # 항상 위에 노출
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # 크기 및 중앙 배치 계산
-        win_w, win_h = 380, 160
-        screen_w = dialog.winfo_screenwidth()
-        screen_h = dialog.winfo_screenheight()
-        pos_x = (screen_w - win_w) // 2
-        pos_y = (screen_h - win_h) // 2
-        dialog.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
-
-        # 스타일 정의
-        bg_color = "#F8F9FA"  # 부드러운 소프트 화이트
-        btn_color = "#0078D7"  # 모던 윈도우 블루
-        btn_active = "#106EBE"
-        
-        dialog.config(bg=bg_color)
-        
-        # 내부 패딩 프레임
-        frame = tk.Frame(dialog, bg=bg_color, padx=24, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        # 텍스트 영역 (Rich Text 지원용 Text 위젯)
-        text_area = tk.Text(
-            frame, 
-            wrap=tk.WORD, 
-            font=("Malgun Gothic", 10), 
-            bg=bg_color, 
-            relief=tk.FLAT, 
-            highlightthickness=0, 
-            height=3, 
-            width=40
-        )
-        text_area.pack(fill=tk.X, expand=True)
-
-        # 태그 정의
-        text_area.tag_configure("normal", foreground="#202124", spacing1=4)
-        text_area.tag_configure("highlight", foreground="#D93025", font=("Malgun Gothic", 11, "bold")) # 구글 에러 레드 계열
-
-        # 텍스트 삽입 (2줄)
-        text_area.insert(tk.END, "타 캡쳐프로그램은 사용 불가 합니다.\n", "normal")
-        text_area.insert(tk.END, "F9 ", "highlight")
-        text_area.insert(tk.END, "키를 사용하여 개인정보 마스킹캡쳐를 이용해 주세요.", "normal")
-        
-        text_area.config(state=tk.DISABLED)
-
-        # 닫힐 때 플래그 해제 처리
-        def on_close():
-            self._warning_shown = False
-            dialog.destroy()
-
-        dialog.protocol("WM_DELETE_WINDOW", on_close)
-
-        # 모던 버튼 구현
-        btn_style = {
-            "font": ("Malgun Gothic", 10, "bold"),
-            "fg": "white",
-            "bg": btn_color,
-            "activeforeground": "white",
-            "activebackground": btn_active,
-            "relief": tk.FLAT,
-            "cursor": "hand2",
-            "bd": 0,
-            "padx": 20,
-            "pady": 6
-        }
-        btn = tk.Button(frame, text="확인", command=on_close, **btn_style)
-        btn.pack(pady=(12, 0))
-        
-        # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
-        # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
-        if getattr(sys, 'frozen', False) and not self.is_in_startup():
-            if self.add_to_startup():
-                try:
-                    self.tray_icon.notify(
-                        "시작 프로그램에 자동 등록되었습니다.\n"
-                        "해제하려면 트레이 메뉴 → '윈도우 시작 시 자동 실행'을 클릭하세요.",
-                        "개인정보마스킹"
-                    )
-                except Exception:
-                    pass
-
-        # 4. 콘솔 상태 출력
         print("==========================================================")
         print("개인정보 마스킹 화면 캡처 프로그램이 구동되었습니다.")
         print("- 캡처 단축키: [ F9 ]")
         print("- 트레이 메뉴에서 '윈도우 시작 시 자동 실행' 등록/해제 가능")
         print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
         print("==========================================================")
-
-    # ── 타 캡쳐프로그램 금지 옵션 관리 메서드 ───────────────────────────────
-    def toggle_block_other_captures(self, icon, item):
-        """
-        트레이 메뉴에서 '타 캡쳐프로그램 금지' 메뉴 토글 시 옵션을 활성화/비활성화합니다.
-        """
-        self.config = load_config()
-        val = not self.config.get("block_other_captures", False)
-        self.config["block_other_captures"] = val
-        save_config(self.config)
-        
-        # 트레이 메뉴 갱신
-        if self.tray_icon:
-            self.tray_icon.update_menu()
-            
-        # 차단기 상태 갱신
-        self.start_capture_blocker()
-        
-        # 알림 메시지 노출
-        if self.tray_icon:
-            msg = "타 캡쳐프로그램 동작 및 Print Screen 캡처가 금지되었습니다." if val else "타 캡쳐프로그램 금지 옵션이 해제되었습니다."
-            try:
-                self.tray_icon.notify(msg, "개인정보마스킹")
-            except:
-                pass
-
-    def start_capture_blocker(self):
-        """
-        설정 상태에 맞춰 백그라운드 차단 스레드를 켭니다.
-        """
-        self.config = load_config()
-        enabled = self.config.get("block_other_captures", False)
-        
-        # 1. 백그라운드 프로세스/클립보드 감시 스레드 가동
-        if enabled:
-            if not self.block_running:
-                self.block_running = True
-                self.block_thread = threading.Thread(target=self.capture_block_worker, daemon=True)
-                self.block_thread.start()
-        else:
-            self.block_running = False
-
-    def stop_capture_blocker(self):
-        """
-        차단 관련 자원을 정지하고 소거합니다.
-        """
-        self.block_running = False
-
-    def capture_block_worker(self):
-        """
-        0.1초마다 실행 중인 프로세스 목록을 ctypes로 가볍게 스캔하여,
-        차단 대상 캡처 프로그램이 발견되면 즉시 강제 종료하고 안내 경고창을 띄웁니다.
-        """
-        import time
-        import subprocess
-        import ctypes
-        
-        # 1. ctypes 기반 고속 프로세스 스캔 헬퍼 정의
-        def get_running_block_targets(target_names):
-            TH32CS_SNAPPROCESS = 0x00000002
-            
-            class PROCESSENTRY32(ctypes.Structure):
-                _fields_ = [
-                    ("dwSize", ctypes.c_ulong),
-                    ("cntUsage", ctypes.c_ulong),
-                    ("th32ProcessID", ctypes.c_ulong),
-                    ("th32DefaultHeapID", ctypes.c_void_p),
-                    ("th32ModuleID", ctypes.c_ulong),
-                    ("cntThreads", ctypes.c_ulong),
-                    ("th32ParentProcessID", ctypes.c_ulong),
-                    ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", ctypes.c_ulong),
-                    ("szExeFile", ctypes.c_char * 260)
-                ]
-                
-            CreateToolhelp32Snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot
-            Process32First = ctypes.windll.kernel32.Process32First
-            Process32Next = ctypes.windll.kernel32.Process32Next
-            CloseHandle = ctypes.windll.kernel32.CloseHandle
-            
-            hProcessSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-            if hProcessSnap == -1:
-                return []
-                
-            pe32 = PROCESSENTRY32()
-            pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
-            
-            found_targets = []
-            if Process32First(hProcessSnap, ctypes.byref(pe32)):
-                while True:
-                    exe_name = pe32.szExeFile.decode('ansi', errors='ignore').lower()
-                    for t_name in target_names:
-                        if exe_name == t_name.lower():
-                            found_targets.append(t_name)
-                    if not Process32Next(hProcessSnap, ctypes.byref(pe32)):
-                        break
-                        
-            CloseHandle(hProcessSnap)
-            return found_targets
-
-        # 강제 차단할 캡처 프로그램 목록
-        block_processes = [
-            "SnippingTool.exe",        # 윈도우 기본 캡처 도구
-            "ScreenSketch.exe",        # 캡처 및 스케치
-            "SnippingToolProcess.exe", # Windows 11 캡처 도구 프로세스
-            "ALCapture.exe",           # 알캡처
-            "PicPick.exe",             # 픽픽
-            "ShareX.exe"               # ShareX
-        ]
-        
-        # 프로세스 종료용 CMD 명령 비동기 실행을 위한 구조체 설정 (콘솔창 숨김)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        print("[Blocker] 감시 스레드 구동 시작 (주기: 0.1초)")
-        
-        while self.block_running:
-            # 2. 실행 중인 차단 대상 캡처 프로그램이 있는지 스냅샷 검사 (1ms 이하 소요)
-            detected = get_running_block_targets(block_processes)
-            
-            if detected:
-                # 3. 감지된 프로세스가 있는 경우에만 taskkill 비동기 실행 및 알림 연동
-                kill_cmds = []
-                for p in detected:
-                    kill_cmds.append(f"/im {p}")
-                cmd_args = ["taskkill", "/F"] + kill_cmds
-                
-                try:
-                    subprocess.Popen(
-                        cmd_args, 
-                        startupinfo=startupinfo, 
-                        stdout=subprocess.DEVNULL, 
-                        stderr=subprocess.DEVNULL
-                    )
-                    print(f"[Blocker] 감지되어 즉시 차단 명령 전송: {detected}")
-                    # 비동기 경고창 팝업 연동
-                    self.root.after(0, self.show_block_warning)
-                except Exception as e:
-                    print(f"[Blocker] taskkill 오류: {e}")
-                    
-            # 4. 0.1초 초고속 대기
-            time.sleep(0.1)
-            
-        print("[Blocker] 감시 스레드 구동 종료")
 
 
 # 전역 변수로 뮤텍스 객체 참조를 유지하여 가비지 컬렉터에 의해 핸들이 닫히는 현상을 방지합니다.

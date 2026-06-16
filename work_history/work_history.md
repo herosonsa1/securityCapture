@@ -595,6 +595,37 @@ if img_w != width or img_h != height:
 - `scratch/test_real_image.py` 검증 테스트를 완료했습니다.
 - `build_exe.py`를 실행하여 새로운 초고속 차단 로직이 탑재된 배포용 단독 실행 파일인 `dist/PrivacyMasker.exe` 재생성을 성공적으로 완료했습니다.
 
+---
+
+## 2026-06-16 (추가 13) — 타 캡처프로그램 차단 기능 완전 제거
+
+### 작업 배경
+- 사용자의 보안 캡처 및 화면 캡처 방지 동작 제한 해제 요청에 따라, 기존에 구현되었던 타 캡처프로그램 차단 로직(PrintScreen/Windows+Shift+S 키 가로채기 훅, 백그라운드 프로세스 감시 스레드, 차단 경고 창 등)을 전부 제거하고 원래의 윈도우 기본 캡처 기능이 작동하도록 복원합니다.
+
+---
+
+### 수정 파일
+- `main.py`
+
+---
+
+### 수정 내용
+- **차단 관련 멤버 변수 제거**:
+  - `__init__` 메서드 내의 차단 관련 스레드 및 제어 플래그 변수(`block_thread`, `block_running`, `_warning_shown`)를 제거했습니다.
+- **키보드 리스너 필터 내 차단 로직 제거**:
+  - `start_keyboard_listener` 내 `win32_filter`에서 `VK_SNAPSHOT (0x2C)` 및 `VK_S (0x53)` 키 입력을 차단하던 모든 감지 및 가로채기 코드를 삭제했습니다. 이제 F9 단축키 이벤트만 캡처 핫키로 정상 처리하고, PrintScreen과 Windows+Shift+S 입력은 아무 제약 없이 윈도우 기본 동작으로 흘러가게 복원되었습니다.
+- **트레이 메뉴 및 제어 함수 제거**:
+  - `start_tray` 메뉴 목록에서 `"타 캡쳐프로그램 금지"` 토글 아이템을 제거했습니다.
+  - `exit_app` 및 `setup_app_components` 내에 존재하던 차단 스레드 시작/종료 제어 호출부(`start_capture_blocker()`, `stop_capture_blocker()`)를 제거했습니다.
+- **불필요한 차단 헬퍼 메서드 삭제**:
+  - `show_block_warning`, `toggle_block_other_captures`, `start_capture_blocker`, `stop_capture_blocker`, `capture_block_worker` 및 `get_running_block_targets` 함수를 완전히 삭제했습니다.
+
+---
+
+### 검증 및 빌드
+- `scratch/test_real_image.py`를 실행하여 마스킹 엔진의 핵심 마스킹 기능들에 이상이 없음을 정상 검증했습니다.
+- `build_exe.py`를 재수행하여 차단 기능이 완전히 배제된 새로운 단독 실행 파일 `dist/PrivacyMasker.exe`를 성공적으로 생성했습니다.
+
 
 
 
