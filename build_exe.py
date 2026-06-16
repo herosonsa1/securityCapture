@@ -23,17 +23,12 @@ def build():
     # -F / --onefile : 단일 실행 파일 빌드
     # -w / --noconsole : GUI 전용 (콘솔 창 숨김)
     # --add-data : ocr_engine.ps1 스크립트를 빌드 파일 내부에 삽입 (Windows 구분자는 세미콜론)
-    # --collect-all=easyocr : EasyOCR에 필요한 모든 데이터 및 바이너리 포함
-    # --collect-data=torch / --collect-binaries=torch : PyTorch의 필수 DLL 및 리소스 포함
     # --clean : 빌드 캐시 클리어
     PyInstaller.__main__.run([
         'main.py',
         '--onefile',
         '--noconsole',
         '--add-data=ocr_engine.ps1;.',
-        '--collect-all=easyocr',
-        '--collect-data=torch',
-        '--collect-binaries=torch',
         '--name=PrivacyMasker',
         '--clean'
     ])

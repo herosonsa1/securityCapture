@@ -667,9 +667,9 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
         "운전자", "운전자명"
     }
     RRN_LABELS = {
-        "주민등록번호", "주민번호", "실명번호", "외국인등록번호", "등록번호", "주민등록 번호",
-        "주원들릨ä호", "주원들", "릨ä호", "들릨ä", "주원", "주민등록", "등록번호", "주원들릨", "릨ä",
-        "주인등록변호", "주인등록", "등록변호", "변호", "주인등록변"
+        "주민등록번호", "주민번호", "실명번호", "외국인등록번호", "주민등록 번호",
+        "주원들릨ä호", "주원들", "릨ä호", "들릨ä", "주원", "주민등록", "주원들릨", "릨ä",
+        "주인등록변호", "주인등록", "주인등록변"
     }
     PHONE_LABELS = {
         "휴대폰번호", "휴대폰", "연락처", "전화번호", "핸드폰", "이동전화", "휴대폰 번호", "전화 번호",
@@ -861,11 +861,10 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
         # 2. 주민번호 레이블 판정 완화 (오인식 오타 대응 및 유사성 결합 매칭)
         elif (any(lbl in text_stripped for lbl in RRN_LABELS) or
               ("주민" in text_stripped and "번호" in text_stripped) or
-              ("등록" in text_stripped and "번호" in text_stripped) or
-              ("주원" in text_stripped) or ("들릨" in text_stripped) or ("릨ä" in text_stripped) or
-              ("주인" in text_stripped and "변호" in text_stripped) or
-              ("주" in text_stripped and ("번호" in text_stripped or "변호" in text_stripped or "호" in text_stripped)) or
-              ("등록" in text_stripped and ("번호" in text_stripped or "변호" in text_stripped or "호" in text_stripped))):
+              ("주인" in text_stripped and "번호" in text_stripped) or
+              ("주원" in text_stripped and "번호" in text_stripped) or
+              ("들릨" in text_stripped and "번호" in text_stripped) or
+              ("주인" in text_stripped and "변호" in text_stripped)):
             if "접수" not in text_stripped and "제휴" not in text_stripped:
                 matched_label_type = "rrn"
 
@@ -935,8 +934,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                     last_label_word = nw
                 effective_label_word = last_label_word
 
-        # Y축 오차 허용치를 최소 30픽셀 이상으로 넉넉하게 잡음 (표 내부 셀 정렬 편차 극복)
-        y_tolerance = max(word['height'] * 2.0, 30)
+        # Y축 오차 허용치를 엄격하게 제한하여 아래위 다른 행의 텍스트 오수집(병합 오탐) 방지
+        y_tolerance = max(word['height'] * 0.9, 12)
         
         candidates = []
         lbl_ref = effective_label_word  # 후보 탐색 기준점 (사전스캔 시 마지막 레이블 단어)
@@ -1094,7 +1093,13 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                         if sub_masks:
                             mask_regions.extend(sub_masks)
                         else:
-                            mask_regions.append(merged)
+                            # sub_masks가 비어있을 때, 무조건 통째로 가리는 것은 오탐이 크므로
+                            # 최소한 주민번호 구조의 특징(숫자, 대시, 별표 등)을 가졌는지 검증 후 마스킹
+                            norm_comb = re.sub(r'[\[\]]', '', combined_text)
+                            digits_in_comb = re.sub(r'\D', '', norm_comb)
+                            stars_in_comb = len(re.findall(r'\*', norm_comb))
+                            if len(digits_in_comb) >= 6 or (len(digits_in_comb) >= 3 and '-' in norm_comb and stars_in_comb >= 3):
+                                mask_regions.append(merged)
                     for rw in rrn_words:
                         used_indices.add(rw['_idx'])
                         
@@ -1103,22 +1108,24 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             # 3분리 입력 필드([010] - [3559] - [4313]) 형태 완전 지원
             phone_words = []
             # gap을 레이블 기준이 아닌 직전 수집 단어 기준으로 계산 (분리 필드가 멀어도 수집)
-            max_phone_seg_gap = max(word['height'] * 8.0, 120)  # 세그먼트 간 최대 허용 간격
-            max_phone_start_gap = max(word['height'] * 40.0, 800)  # 레이블→첫 값 최대 간격 (드롭다운 선택자 등 중간 UI 고려하여 확대)
+            max_phone_seg_gap = max(word['height'] * 25.0, 400)  # 세그먼트 간 최대 허용 간격 대폭 확대
+            max_phone_start_gap = max(word['height'] * 45.0, 900)  # 레이블→첫 값 최대 간격 확대
 
             prev_collected = None  # 직전에 수집한 단어
 
             for cand in candidates:
+                if cand.get('_pre_scanned'):
+                    continue
                 if prev_collected is None:
                     # 아직 아무것도 수집 전: 레이블 기준 gap 체크
                     gap = cand['x'] - (lbl_ref['x'] + lbl_ref['width'])
                     if gap > max_phone_start_gap:
-                        break
+                        continue  # break 대신 continue로 뒷부분 후보 계속 검증
                 else:
                     # 이미 수집 시작: 직전 수집 단어 기준 gap 체크
                     gap = cand['x'] - (prev_collected['x'] + prev_collected['width'])
                     if gap > max_phone_seg_gap:
-                        break
+                        continue  # break 대신 continue
 
                 # 필수 입력 별표 기호는 필터링 (값이 없을 때 표시하는 *)
                 if cand['text'].strip() == '*' and not phone_words:
@@ -1139,28 +1146,25 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                     if digits_only:
                         numeric_segs.append((pw, digits_only))
 
-                if len(numeric_segs) >= 3:
-                    # 3개 이상 숫자 세그먼트: 첫 번째(01x)는 노출, 나머지(국번+끝번호) 마스킹
-                    # 단, 국번(두 번째)과 끝번호(세 번째)만 마스킹
+                if len(numeric_segs) >= 2 and re.match(r'^01[0-9]$|^0[2-6]\d?$', numeric_segs[0][1]):
+                    # 첫 번째 세그먼트가 010 등 번호 식별자이면 노출하고, 나머지 세그먼트들을 마스킹 대상에 추가
                     for seg_idx, (pw, digits) in enumerate(numeric_segs):
                         if seg_idx == 0:
-                            continue  # 첫 번째(010)은 노출
+                            continue  # 첫 번째는 노출
+                        
+                        pw_text_norm = re.sub(r'[\[\]]', '', pw['text'])
+                        if '-' in pw_text_norm:
+                            sub = calculate_sub_masks(pw_text_norm, pw['x'], pw['y'], pw['width'], pw['height'], name_mask_style)
+                            if sub:
+                                mask_regions.extend(sub)
+                                continue
+                        
                         mask_regions.append({
                             'x': pw['x'], 'y': pw['y'],
                             'width': pw['width'], 'height': pw['height']
                         })
-                elif len(numeric_segs) == 2:
-                    # 세그먼트 2개 (예: 010-12345678 → 뒷부분 마스킹)
-                    merged = merge_boxes(phone_words)
-                    if merged:
-                        combined_text = "".join(re.sub(r'[\[\]]', '', w['text']) for w in phone_words)
-                        sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
-                        if sub_masks:
-                            mask_regions.extend(sub_masks)
-                        else:
-                            mask_regions.append(merged)
                 else:
-                    # 단어 1개 처리 (단일 토큰 전화번호)
+                    # 단일 토큰 또는 식별자가 없는 경우 일반 마스킹 적용
                     merged = merge_boxes(phone_words)
                     if merged:
                         combined_text = re.sub(r'[\[\]]', '', "".join(w['text'] for w in phone_words))
@@ -1480,11 +1484,19 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                             has_kw = True
                             last_kw_idx = max(last_kw_idx, idx)
                             
+                    # 단어 내에서 숫자의 시작 위치 탐색
+                    num_match = re.search(r'\d', aw_text_norm)
+                    num_start_idx = num_match.start() if num_match else -1
+                    
                     if has_kw:
                         seen_base_addr = True
-                        # 키워드 이후에 상세주소가 붙어있는 경우 부분 마스킹 (예: 대연3동54-1)
-                        if last_kw_idx + 1 < len(aw_text_norm):
-                            split_idx = last_kw_idx + 1
+                        
+                        # 1. 키워드 이후에 숫자가 있는 경우 (예: "대연3동54-1")
+                        after_kw_str = aw_text_norm[last_kw_idx + 1:]
+                        num_match_after = re.search(r'\d', after_kw_str)
+                        
+                        if num_match_after:
+                            split_idx = (last_kw_idx + 1) + num_match_after.start()
                             char_w = aw['width'] / max(1, len(aw_text_norm))
                             mask_regions.append({
                                 'x': int(aw['x'] + split_idx * char_w),
@@ -1492,7 +1504,39 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                                 'width': int((len(aw_text_norm) - split_idx) * char_w),
                                 'height': aw['height']
                             })
-                        # "동", "로" 등으로 끝나는 단어(예: "대연3동")는 기본 주소이므로 노출
+                        # 2. 키워드 이전 또는 키워드 포함 부위에 숫자가 있는 경우 (예: "123번길", "대연3동")
+                        elif num_start_idx != -1:
+                            # 숫자 부분부터 키워드까지의 텍스트 추출
+                            num_to_kw = aw_text_norm[num_start_idx:last_kw_idx + 1]
+                            num_part = re.sub(r'\D', '', num_to_kw)
+                            kw_part = re.sub(r'\d', '', num_to_kw)
+                            
+                            # 1자리 숫자 + [동/가/읍/면/시/도] 인 경우는 행정구역 번호이므로 노출 유지
+                            is_admin_dong = len(num_part) == 1 and kw_part in ["동", "가", "읍", "면", "시", "도"]
+                            
+                            if is_admin_dong:
+                                pass
+                            else:
+                                # 그 외의 건물번호(123번길 등)나 도로명 숫자는 숫자 시작 위치부터 마스킹
+                                split_idx = num_start_idx
+                                char_w = aw['width'] / max(1, len(aw_text_norm))
+                                mask_regions.append({
+                                    'x': int(aw['x'] + split_idx * char_w),
+                                    'y': aw['y'],
+                                    'width': int((len(aw_text_norm) - split_idx) * char_w),
+                                    'height': aw['height']
+                                })
+                        else:
+                            # 숫자가 없는데 키워드 이후에 문자가 더 붙어 있다면 부분 마스킹
+                            if last_kw_idx + 1 < len(aw_text_norm):
+                                split_idx = last_kw_idx + 1
+                                char_w = aw['width'] / max(1, len(aw_text_norm))
+                                mask_regions.append({
+                                    'x': int(aw['x'] + split_idx * char_w),
+                                    'y': aw['y'],
+                                    'width': int((len(aw_text_norm) - split_idx) * char_w),
+                                    'height': aw['height']
+                                })
                     else:
                         # 행정구역 키워드가 없으면서, 이미 기본 주소를 지났거나 첫 단어부터 없는 경우 상세주소 단어로 간주하여 박스 전체 마스킹
                         mask_regions.append({

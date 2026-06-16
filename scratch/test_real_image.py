@@ -122,5 +122,54 @@ def run_simulated_tests():
     for m in mask_7:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
 
+    # 시나리오 8: 증권번호 오탐 차단 검증
+    # [증권번호] [CA0023456000000] [통합상품 개인용]
+    # 예상 결과: 주민번호로 오인식되더라도 자릿수 검증에 의해 마스킹 영역 0개 (무마스킹)
+    print("\n[시나리오 8] 증권번호 오탐 차단 검증")
+    words_8 = [
+        {"text": "증권번호", "x": 10, "y": 700, "width": 50, "height": 20},
+        {"text": "CA0023456000000", "x": 70, "y": 700, "width": 120, "height": 20},
+        {"text": "통합상품 개인용", "x": 200, "y": 700, "width": 100, "height": 20}
+    ]
+    ocr_res_8 = {"status": "success", "words": words_8}
+    mask_8, label_8 = detect_personal_info(ocr_res_8)
+    print("  * 감지된 마스킹 영역 수:", len(mask_8))
+    for m in mask_8:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
+    # 시나리오 9: 연락처 010 노출 및 뒷번호 마스킹 검증
+    # [연락처] [핸드폰] [010] [-] [4355] [-] [4613]
+    # 예상 결과: 010은 노출되고 4355와 4613만 마스킹 처리됨
+    print("\n[시나리오 9] 연락처 010 노출 및 뒷번호 마스킹")
+    words_9 = [
+        {"text": "연락처", "x": 10, "y": 800, "width": 40, "height": 20},
+        {"text": "핸드폰", "x": 60, "y": 800, "width": 40, "height": 20},
+        {"text": "[010]", "x": 110, "y": 800, "width": 35, "height": 20},
+        {"text": "[-]", "x": 150, "y": 800, "width": 10, "height": 20},
+        {"text": "[4355]", "x": 165, "y": 800, "width": 35, "height": 20},
+        {"text": "[-]", "x": 205, "y": 800, "width": 10, "height": 20},
+        {"text": "[4613]", "x": 220, "y": 800, "width": 35, "height": 20}
+    ]
+    ocr_res_9 = {"status": "success", "words": words_9}
+    mask_9, label_9 = detect_personal_info(ocr_res_9)
+    print("  * 감지된 마스킹 영역 수:", len(mask_9))
+    for m in mask_9:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
+    # 시나리오 10: 도로명 주소 고도화 검증
+    # [주소] [중앙대로 123번길] [54-1]
+    # 예상 결과: "중앙대로 "는 노출, "123번길"은 "123"부터 마스킹, "54-1"은 전체 마스킹
+    print("\n[시나리오 10] 도로명 주소 및 상세 지번 고도화")
+    words_10 = [
+        {"text": "주소", "x": 10, "y": 900, "width": 30, "height": 20},
+        {"text": "중앙대로 123번길", "x": 50, "y": 900, "width": 110, "height": 20},
+        {"text": "54-1", "x": 170, "y": 900, "width": 40, "height": 20}
+    ]
+    ocr_res_10 = {"status": "success", "words": words_10}
+    mask_10, label_10 = detect_personal_info(ocr_res_10)
+    print("  * 감지된 마스킹 영역 수:", len(mask_10))
+    for m in mask_10:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
 if __name__ == "__main__":
     run_simulated_tests()
