@@ -57,6 +57,11 @@ class EditWindow:
         
         # 다시 캡처 요청 상태 플래그
         self.recapture_requested = False
+        
+        # 원형 로딩 스피너 관련 상태 변수
+        self.spinner_angle = 0
+        self.spinner_items = []
+        self.spinner_running = False
 
     def show(self):
         # 1. OCR 엔진 백그라운드 구동을 위해 임시 저장
@@ -101,27 +106,7 @@ class EditWindow:
             text="개인정보 자동 탐지 중입니다. 잠시만 기다려주세요...", 
             fg="#e0e0e0", bg="#1e1e1e", font=("맑은 고딕", 10, "bold")
         )
-        self.info_label.pack(pady=5)
-
-        # 다크 테마에 맞는 파란색 스타일 프로그레스 바 추가
-        self.style = ttk.Style()
-        self.style.theme_use('default')
-        self.style.configure(
-            "TProgressbar", 
-            thickness=6, 
-            troughcolor="#1e1e1e", 
-            background="#007acc", 
-            lightcolor="#007acc", 
-            darkcolor="#007acc"
-        )
-        self.progress = ttk.Progressbar(
-            self.root, 
-            mode='indeterminate', 
-            length=350, 
-            style="TProgressbar"
-        )
-        self.progress.pack(pady=5)
-        self.progress.start(10) # 10ms마다 자연스러운 무한 반복 애니메이션 동작
+        self.info_label.pack(pady=10)
         
         # 4. 하단 툴바 레이아웃 (다크 모드 스타일 버튼) - 창 세로 크기 감소 시 툴바 잘림을 막기 위해 canvas_frame보다 먼저 아래쪽에 팩(pack)합니다.
         toolbar = tk.Frame(self.root, bg="#1e1e1e")
@@ -227,6 +212,9 @@ class EditWindow:
         # 5. 초기 캔버스 화면 드로잉 (아직 마스킹 없음)
         self.redraw_canvas()
         
+        # 원형 로딩 스피너 시작
+        self.start_spinner()
+        
         # 6. 마우스 바인딩 (수동 추가 및 클릭 제거)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
@@ -269,14 +257,8 @@ class EditWindow:
             self.safe_remove_temp_file(temp_img_path)
             return
 
-        # 백그라운드 분석이 완료되었으므로 프로그레스 바 중지 및 파괴
-        if hasattr(self, 'progress') and self.progress:
-            try:
-                self.progress.stop()
-                self.progress.destroy()
-                self.progress = None
-            except Exception as e:
-                print(f"프로그레스 바 제거 중 예외: {e}")
+        # 백그라운드 분석이 완료되었으므로 원형 로딩 스피너 정지 및 제거
+        self.stop_spinner()
             
         if ocr_result.get("status") == "success":
             # 디버깅용 OCR 결과 로컬 세이브
@@ -605,6 +587,69 @@ class EditWindow:
         self.close_editor()
 
     def close_editor(self):
+        # 창이 닫힐 때 원형 스피너 안전하게 종료
+        self.stop_spinner()
         if self.root:
             self.root.destroy()
             self.root = None
+
+    def start_spinner(self):
+        """캔버스 이미지 중앙에 원형 로딩 스피너 애니메이션을 구동합니다."""
+        self.spinner_running = True
+        self.spinner_angle = 0
+        self.animate_spinner()
+
+    def stop_spinner(self):
+        """원형 로딩 스피너를 정지하고 캔버스에 그려진 스피너 잔해를 깨끗하게 제거합니다."""
+        self.spinner_running = False
+        for item in self.spinner_items:
+            try:
+                self.canvas.delete(item)
+            except:
+                pass
+        self.spinner_items = []
+
+    def animate_spinner(self):
+        """캔버스 중앙에 파란색 아크 원형 링을 30ms 주기로 회전 렌더링합니다."""
+        if not self.spinner_running or not self.root:
+            return
+            
+        # 기존 스피너 프레임 요소 소거
+        for item in self.spinner_items:
+            try:
+                self.canvas.delete(item)
+            except:
+                pass
+        self.spinner_items = []
+        
+        try:
+            # 캔버스 이미지 크기의 중앙 좌표 도출
+            img_w, img_h = self.original_image.size
+            cx = img_w // 2
+            cy = img_h // 2
+            
+            # 스피너 외곽 반지름
+            r = 30
+            
+            # 1. 둥근 백그라운드 트랙 회색 링
+            bg_ring = self.canvas.create_oval(
+                cx - r, cy - r, cx + r, cy + r, 
+                outline="#2b2b2b", width=5
+            )
+            self.spinner_items.append(bg_ring)
+            
+            # 2. 회전하는 파란색 로딩 아크 (100도 가량의 호)
+            spin_arc = self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=self.spinner_angle, extent=100,
+                style="arc", outline="#007acc", width=5
+            )
+            self.spinner_items.append(spin_arc)
+            
+            # 시계 방향 회전 (프레임당 12도씩 감산)
+            self.spinner_angle = (self.spinner_angle - 12) % 360
+            
+            # 30ms 지연 기법으로 자연스러운 애니메이션 루프 수행
+            self.root.after(30, self.animate_spinner)
+        except Exception as e:
+            print(f"[로딩 스피너 애니메이션 예외] {e}")
