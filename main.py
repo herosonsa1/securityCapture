@@ -46,6 +46,7 @@ class PrivacyMaskerApp:
         # 타 캡처프로그램 금지 스레드 및 리스너
         self.block_thread = None
         self.block_running = False
+        self._warning_shown = False
         
         # 자체 복사 시 클립보드 보호 차단 우회 플래그
         self.skip_clipboard_clear = False
@@ -447,11 +448,16 @@ class PrivacyMaskerApp:
 
     def start_keyboard_listener(self):
         """
-        단 하나의 전역 키보드 리스너를 가동하여 F9 핫키 감지 및 PrintScreen 차단을 일괄 처리합니다.
+        단 하나의 전역 키보드 리스너를 가동하여 F9 핫키 감지, PrintScreen 및 Windows+Shift+S 차단을 일괄 처리합니다.
         pynput 리스너 중복 구동으로 인한 윈도우 훅 충돌을 원천 차단합니다.
         """
         if self.keyboard_listener:
             return
+
+        import ctypes
+        GetAsyncKeyState = ctypes.windll.user32.GetAsyncKeyState
+        GetAsyncKeyState.argtypes = [ctypes.c_int]
+        GetAsyncKeyState.restype = ctypes.c_short
 
         def win32_filter(msg, data):
             # 1. F9 단축키 처리 (VK_F9 = 0x78)
@@ -460,14 +466,30 @@ class PrivacyMaskerApp:
                 if msg in (0x0100, 0x0104):
                     self.root.after(0, self.on_hotkey_triggered)
                 return False  # 시스템 전파 차단하여 핫키만 삼킴
-                
-            # 2. PrintScreen 차단 처리 (VK_SNAPSHOT = 0x2C)
-            if data.vkCode == 0x2C:
-                cur_cfg = load_config()
-                if cur_cfg.get("block_other_captures", False):
-                    print("[차단] Print Screen 키 입력 무효화 완료")
+
+            # '타 캡쳐프로그램 금지' 설정이 활성화된 경우만 캡처 단축키 차단 처리
+            cur_cfg = load_config()
+            if cur_cfg.get("block_other_captures", False):
+                # 2. PrintScreen 차단 처리 (VK_SNAPSHOT = 0x2C)
+                if data.vkCode == 0x2C:
+                    if msg in (0x0100, 0x0104):
+                        print("[차단] Print Screen 키 입력 무효화 완료")
+                        self.root.after(0, self.show_block_warning)
                     return False  # 시스템 전파 차단하여 캡처 방지
+
+                # 3. Windows + Shift + S 차단 처리 ('S' 키 = 0x53)
+                if data.vkCode == 0x53:
+                    # Windows 키 상태 검사 (LWIN: 0x5B, RWIN: 0x5C)
+                    win_pressed = (GetAsyncKeyState(0x5B) & 0x8000) or (GetAsyncKeyState(0x5C) & 0x8000)
+                    # Shift 키 상태 검사 (SHIFT: 0x10, LSHIFT: 0xA0, RSHIFT: 0xA1)
+                    shift_pressed = (GetAsyncKeyState(0x10) & 0x8000) or (GetAsyncKeyState(0xA0) & 0x8000) or (GetAsyncKeyState(0xA1) & 0x8000)
                     
+                    if win_pressed and shift_pressed:
+                        if msg in (0x0100, 0x0104):
+                            print("[차단] Windows+Shift+S 단축키 입력 무효화 완료")
+                            self.root.after(0, self.show_block_warning)
+                        return False  # 시스템 전파 차단하여 캡처 방지
+
             return True
 
         try:
@@ -476,6 +498,24 @@ class PrivacyMaskerApp:
             print("[Keyboard] 단일 통합 키보드 리스너 구동 시작")
         except Exception as e:
             print(f"[Keyboard] 통합 키보드 리스너 기동 실패: {e}")
+
+    def show_block_warning(self):
+        """
+        타 캡처 단축키 입력 시 차단 안내 경고창을 표시합니다.
+        중복 팝업이 뜨지 않도록 제어합니다.
+        """
+        if getattr(self, "_warning_shown", False):
+            return
+        self._warning_shown = True
+        
+        # 안내 문구 팝업
+        messagebox.showwarning(
+            "캡처 사용 불가 안내",
+            "타 캡쳐프로그램은 사용 불가 합니다.\n"
+            "F9키를 사용하여 개인정보 마스킹캡쳐를 이용해 주세요.",
+            parent=self.root
+        )
+        self._warning_shown = False
         
         # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
         # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
@@ -547,20 +587,10 @@ class PrivacyMaskerApp:
 
     def capture_block_worker(self):
         """
-        0.5초마다 타 캡처 도구 프로세스를 강제 종료하고 클립보드를 감시하여 캡처를 차단합니다.
+        0.5초마다 타 캡처 도구 프로세스를 강제 종료합니다.
         """
         import time
         import subprocess
-        import ctypes
-        
-        # 클립보드 API
-        OpenClipboard = ctypes.windll.user32.OpenClipboard
-        CloseClipboard = ctypes.windll.user32.CloseClipboard
-        EmptyClipboard = ctypes.windll.user32.EmptyClipboard
-        IsClipboardFormatAvailable = ctypes.windll.user32.IsClipboardFormatAvailable
-        
-        CF_BITMAP = 2
-        CF_DIB = 8
         
         # 강제 차단할 캡처 프로그램 목록
         block_processes = [
@@ -595,41 +625,6 @@ class PrivacyMaskerApp:
                 )
             except Exception as e:
                 print(f"[Blocker] taskkill 오류: {e}")
-                
-            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화)
-            try:
-                if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
-                    is_our_copy = False
-                    # 클립보드를 열고 데이터 형식 검사
-                    if OpenClipboard(None):
-                        try:
-                            GetClipboardData = ctypes.windll.user32.GetClipboardData
-                            GlobalLock = ctypes.windll.kernel32.GlobalLock
-                            GlobalUnlock = ctypes.windll.kernel32.GlobalUnlock
-                            # CF_UNICODETEXT = 13 포맷으로 저장된 시그니처 텍스트 확인
-                            h_clip = GetClipboardData(13)
-                            if h_clip:
-                                p_box = GlobalLock(h_clip)
-                                if p_box:
-                                    try:
-                                        clip_text = ctypes.wstring_at(p_box)
-                                        if "PrivacyMasker_Signature_829cf3" in clip_text:
-                                            is_our_copy = True
-                                    finally:
-                                        GlobalUnlock(h_clip)
-                        finally:
-                            CloseClipboard()
-                            
-                    # 우리 프로그램이 복사한 이미지가 아닐 때만 클립보드를 즉시 비움 (타 캡처 차단)
-                    if not is_our_copy:
-                        if OpenClipboard(None):
-                            try:
-                                EmptyClipboard()
-                                print("[Blocker] 타 캡처본으로 감지되어 클립보드 이미지 소거 완료")
-                            finally:
-                                CloseClipboard()
-            except Exception as e:
-                print(f"[Blocker] 클립보드 소거 오류: {e}")
                 
             time.sleep(0.5)
             
