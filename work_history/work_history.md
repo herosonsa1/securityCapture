@@ -481,6 +481,7 @@ if img_w != width or img_h != height:
 
 #### 1. ctypes 기반 윈도우 API 직접 호출형 고속 클립보드 복사 구현 (`config_manager.py`)
 - **수정**: `OpenClipboard`, `EmptyClipboard`, `SetClipboardData`, `GlobalAlloc` 등 Windows API를 파이썬 ctypes를 통해 직접 호출하는 `copy_image_to_clipboard` 함수를 탑재했습니다.
+- **64비트 Windows 환경 대응 (추가 수정)**: 64비트 Windows 환경에서 `GlobalAlloc`, `GlobalLock` 등의 메모리 주소 및 핸들 값이 32비트 정수로 잘려(truncation) 포인터 손실로 인한 클립보드 쓰기 실패 문제가 있었습니다. 이를 해결하기 위해 `kernel32`와 `user32` 함수들의 `argtypes` 및 `restype`을 64비트 호환 규격(`ctypes.c_void_p`, `ctypes.c_size_t` 등)으로 명시적으로 정의하여 복사 안정성을 원천적으로 해결하였습니다.
 - **방식**: PIL Image를 BMP 포맷으로 변환한 뒤 BMP 파일 헤더(14바이트)를 생략한 DIB 데이터(`CF_DIB`)를 윈도우 글로벌 메모리에 쓰고, 고유 텍스트 시그니처(`CF_UNICODETEXT`)를 한 개의 열린 클립보드 트랜잭션 내에서 원자적(atomic)으로 동시에 씁니다.
 - **효과**: 외부 PowerShell 프로세스를 띄우는 오버헤드가 완전히 사라져 복사 속도가 1ms 수준으로 단축되며, 차단 스레드가 틈에 개입하여 클립보드를 소거하는 레이스 컨디션을 원천 방지합니다. 또한 다른 PC의 PowerShell 실행 권한(Execution Policy) 제약에서도 완전히 자유롭습니다.
 
