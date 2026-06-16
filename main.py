@@ -42,6 +42,11 @@ class PrivacyMaskerApp:
         # 설정 로드 및 마지막 캡처 캐시 변수 초기화
         self.config = load_config()
         self.last_crop_area = None
+        
+        # 타 캡처프로그램 금지 스레드 및 리스너
+        self.block_thread = None
+        self.block_running = False
+        self.prtscr_listener = None
 
     def create_tray_image(self):
         """
@@ -264,6 +269,7 @@ class PrivacyMaskerApp:
             pystray.MenuItem("화면 캡처 (F9)", lambda icon, item: self.on_hotkey_triggered(), default=True),
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
+            pystray.MenuItem("타 캡쳐프로그램 금지", self.toggle_block_other_captures, checked=lambda item: self.config.get("block_other_captures", False)),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(
@@ -318,6 +324,9 @@ class PrivacyMaskerApp:
                 self.keyboard_listener.stop()
             except:
                 pass
+                
+        # 2-2. 차단 리스너 및 백그라운드 스레드 정지
+        self.stop_capture_blocker()
             
         # 3. Tkinter 루프 종료
         if self.root:
@@ -456,6 +465,9 @@ class PrivacyMaskerApp:
         # 1. 시스템 트레이 시작
         self.start_tray()
         
+        # 1-2. 타 캡처프로그램 금지 백그라운드 스레드 및 단축키 차단 리스너 가동
+        self.start_capture_blocker()
+        
         # 2. 전역 단축키 수신 리스너 등록
         # 단축키 조합을 F9 단독 입력('<f9>')으로 변경
         self.keyboard_listener = keyboard.GlobalHotKeys({
@@ -483,6 +495,151 @@ class PrivacyMaskerApp:
         print("- 트레이 메뉴에서 '윈도우 시작 시 자동 실행' 등록/해제 가능")
         print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
         print("==========================================================")
+
+    # ── 타 캡쳐프로그램 금지 옵션 관리 메서드 ───────────────────────────────
+    def toggle_block_other_captures(self, icon, item):
+        """
+        트레이 메뉴에서 '타 캡쳐프로그램 금지' 메뉴 토글 시 옵션을 활성화/비활성화합니다.
+        """
+        self.config = load_config()
+        val = not self.config.get("block_other_captures", False)
+        self.config["block_other_captures"] = val
+        save_config(self.config)
+        
+        # 트레이 메뉴 갱신
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+            
+        # 차단기 상태 갱신
+        self.start_capture_blocker()
+        
+        # 알림 메시지 노출
+        if self.tray_icon:
+            msg = "타 캡쳐프로그램 동작 및 Print Screen 캡처가 금지되었습니다." if val else "타 캡쳐프로그램 금지 옵션이 해제되었습니다."
+            try:
+                self.tray_icon.notify(msg, "개인정보마스킹")
+            except:
+                pass
+
+    def start_capture_blocker(self):
+        """
+        설정 상태에 맞춰 백그라운드 차단 스레드 및 PrintScreen 차단용 키보드 리스너를 켭니다.
+        """
+        self.config = load_config()
+        enabled = self.config.get("block_other_captures", False)
+        
+        # 1. 백그라운드 프로세스/클립보드 감시 스레드 가동
+        if enabled:
+            if not self.block_running:
+                self.block_running = True
+                self.block_thread = threading.Thread(target=self.capture_block_worker, daemon=True)
+                self.block_thread.start()
+        else:
+            self.block_running = False
+            
+        # 2. PrintScreen 단축키 전역 차단 리스너 가동
+        if enabled:
+            if not self.prtscr_listener:
+                def win32_filter(msg, data):
+                    # VK_SNAPSHOT = 0x2C (Print Screen 키)
+                    if data.vkCode == 0x2C:
+                        cur_cfg = load_config()
+                        if cur_cfg.get("block_other_captures", False):
+                            print("[차단] Print Screen 키 입력 무효화 완료")
+                            return False # 이벤트를 차단(suppress)
+                    return True
+                
+                try:
+                    self.prtscr_listener = keyboard.Listener(win32_event_filter=win32_filter)
+                    self.prtscr_listener.start()
+                except Exception as e:
+                    print(f"PrintScreen 차단 리스너 기동 실패: {e}")
+        else:
+            if self.prtscr_listener:
+                try:
+                    self.prtscr_listener.stop()
+                except:
+                    pass
+                self.prtscr_listener = None
+
+    def stop_capture_blocker(self):
+        """
+        차단 관련 자원을 정지하고 소거합니다.
+        """
+        self.block_running = False
+        if self.prtscr_listener:
+            try:
+                self.prtscr_listener.stop()
+            except:
+                pass
+            self.prtscr_listener = None
+
+    def capture_block_worker(self):
+        """
+        0.5초마다 타 캡처 도구 프로세스를 강제 종료하고 클립보드를 감시하여 캡처를 차단합니다.
+        """
+        import time
+        import subprocess
+        import ctypes
+        
+        # 클립보드 API
+        OpenClipboard = ctypes.windll.user32.OpenClipboard
+        CloseClipboard = ctypes.windll.user32.CloseClipboard
+        EmptyClipboard = ctypes.windll.user32.EmptyClipboard
+        IsClipboardFormatAvailable = ctypes.windll.user32.IsClipboardFormatAvailable
+        
+        CF_BITMAP = 2
+        CF_DIB = 8
+        
+        # 강제 차단할 캡처 프로그램 목록
+        block_processes = [
+            "SnippingTool.exe",        # 윈도우 기본 캡처 도구
+            "ScreenSketch.exe",        # 캡처 및 스케치
+            "SnippingToolProcess.exe", # Windows 11 캡처 도구 프로세스
+            "ALCapture.exe",           # 알캡처
+            "PicPick.exe",             # 픽픽
+            "ShareX.exe"               # ShareX
+        ]
+        
+        # 프로세스 종료용 CMD 명령 비동기 실행을 위한 구조체 설정 (콘솔창 숨김)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        print("[Blocker] 감시 스레드 구동 시작")
+        
+        while self.block_running:
+            # 1. 캡처 프로그램 프로세스 강제 종료 시도
+            kill_cmds = []
+            for p in block_processes:
+                kill_cmds.append(f"/im {p}")
+            cmd_args = ["taskkill", "/F"] + kill_cmds
+            
+            try:
+                subprocess.Popen(
+                    cmd_args, 
+                    startupinfo=startupinfo, 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                print(f"[Blocker] taskkill 오류: {e}")
+                
+            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화)
+            try:
+                if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
+                    if OpenClipboard(None):
+                        try:
+                            EmptyClipboard()
+                            print("[Blocker] 클립보드 이미지 차단 처리 완료")
+                        finally:
+                            CloseClipboard()
+            except Exception as e:
+                print(f"[Blocker] 클립보드 소거 오류: {e}")
+                
+            time.sleep(0.5)
+            
+        print("[Blocker] 감시 스레드 구동 종료")
 
 
 # 전역 변수로 뮤텍스 객체 참조를 유지하여 가비지 컬렉터에 의해 핸들이 닫히는 현상을 방지합니다.
