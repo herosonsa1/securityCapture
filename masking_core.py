@@ -1054,6 +1054,10 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
 
                 cand_clean = re.sub(r'\s+', '', cand['text'])
 
+                # 한글이 포함된 단어는 주민번호 값 세그먼트가 아니므로 배제
+                if re.search(r'[가-힣]', cand_clean):
+                    continue
+
                 # 비어있거나 시스템 명사(조회, 수정 등)에 해당하면 스킵
                 if not cand_clean or cand_clean in EXCLUDE_NOUNS:
                     continue
@@ -1116,6 +1120,12 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             for cand in candidates:
                 if cand.get('_pre_scanned'):
                     continue
+                
+                cand_clean = re.sub(r'\s+', '', cand['text'])
+                # 한글이 포함된 단어(예: "핸드폰", "휴대폰" 등)는 전화번호 값 세그먼트가 아니므로 완전히 배제
+                if re.search(r'[가-힣]', cand_clean):
+                    continue
+
                 if prev_collected is None:
                     # 아직 아무것도 수집 전: 레이블 기준 gap 체크
                     gap = cand['x'] - (lbl_ref['x'] + lbl_ref['width'])
@@ -1130,8 +1140,6 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 # 필수 입력 별표 기호는 필터링 (값이 없을 때 표시하는 *)
                 if cand['text'].strip() == '*' and not phone_words:
                     continue
-
-                cand_clean = re.sub(r'\s+', '', cand['text'])
                 # 대괄호 포함 여부와 무관하게 숫자가 하나라도 있으면 수집 대상
                 # (예: [010], [3559], [4313], 010, 3559, '-' 모두 포함)
                 if re.search(r'[\d\-*]', re.sub(r'[\[\]]', '', cand_clean)):
@@ -1349,6 +1357,10 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 if not cand_clean or cand_clean in EXCLUDE_NOUNS:
                     break
                     
+                # 차량번호가 아닌 다른 번호형 정보(계좌, 카드 등) 탐색 시 한글 단어는 제외
+                if matched_label_type != "vehicle" and re.search(r'[가-힣]', cand_clean):
+                    continue
+
                 # 특수한 예외: 차량번호 탐색 중 "차량명", "배기량", "연식", "제휴사", "고객", "연락처" 등이 감지되면 탐색 종료
                 if matched_label_type == "vehicle" and any(k in cand_clean for k in ["차량명", "배기량", "연식", "제휴사", "고객", "연락처"]):
                     break
