@@ -46,7 +46,6 @@ class PrivacyMaskerApp:
         # 타 캡처프로그램 금지 스레드 및 리스너
         self.block_thread = None
         self.block_running = False
-        self.prtscr_listener = None
         
         # 자체 복사 시 클립보드 보호 차단 우회 플래그
         self.skip_clipboard_clear = False
@@ -181,50 +180,18 @@ class PrivacyMaskerApp:
             # 3. 이미지 마스킹 필터 적용
             final_img = apply_mask(original_image, mask_boxes, mask_type=mask_type, mosaic_size=10)
             
-            # 4. 클립보드 복사용 임시 세이브
-            temp_out_path = os.path.join(temp_dir, f"temp_bg_copied_capture_{unique_id}.png")
-            final_img.save(temp_out_path)
-            
-            # 6. PowerShell .NET 호출을 통한 이미지 픽셀 데이터 클립보드 복사
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            safe_path = temp_out_path.replace("\\", "\\\\")
-            # DataObject를 통해 이미지와 고유 시그니처 텍스트를 함께 클립보드에 삽입
-            ps_cmd = (
-                "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
-                "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing'); "
-                f"$img = [System.Drawing.Image]::FromFile('{safe_path}'); "
-                "$dataObj = New-Object System.Windows.Forms.DataObject; "
-                "$dataObj.SetImage($img); "
-                "[void]$dataObj.SetText('PrivacyMasker_Signature_829cf3', [System.Windows.Forms.TextDataFormat]::Text); "
-                "[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true); "
-                "$img.Dispose();"
-            )
-            
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                ps_cmd
-            ]
-            
-            try:
-                result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
-                if result.returncode == 0:
-                    cnt = len(mask_boxes)
-                    if cnt > 0:
-                        notify_msg("복사 완료", "개인정보가 제외(마스킹)된 이미지가 클립보드에 복사되었습니다!")
-                    else:
-                        notify_msg("복사 완료", "개인정보가 없는 깨끗한 이미지가 클립보드에 복사되었습니다.")
+            # 4. 고속 클립보드 복사 (ctypes API 직접 호출)
+            from config_manager import copy_image_to_clipboard
+            if copy_image_to_clipboard(final_img):
+                cnt = len(mask_boxes)
+                if cnt > 0:
+                    notify_msg("복사 완료", "개인정보가 제외(마스킹)된 이미지가 클립보드에 복사되었습니다!")
                 else:
-                    notify_msg("오류 발생", f"클립보드 데이터 탑재 실패: {result.stderr}")
-            except Exception as e:
-                notify_msg("오류 발생", f"클립보드 처리 예외 발생: {str(e)}")
-            finally:
-                safe_remove(temp_in_path)
-                safe_remove(temp_out_path)
+                    notify_msg("복사 완료", "개인정보가 없는 깨끗한 이미지가 클립보드에 복사되었습니다.")
+            else:
+                notify_msg("오류 발생", "클립보드 데이터 탑재에 실패했습니다.")
+                
+            safe_remove(temp_in_path)
                 
         # 백그라운드 데몬 스레드로 비동기 구동
         threading.Thread(target=worker, daemon=True).start()
@@ -472,15 +439,43 @@ class PrivacyMaskerApp:
         # 1. 시스템 트레이 시작
         self.start_tray()
         
-        # 1-2. 타 캡처프로그램 금지 백그라운드 스레드 및 단축키 차단 리스너 가동
+        # 1-2. 타 캡처프로그램 금지 백그라운드 스레드 가동
         self.start_capture_blocker()
         
-        # 2. 전역 단축키 수신 리스너 등록
-        # 단축키 조합을 F9 단독 입력('<f9>')으로 변경
-        self.keyboard_listener = keyboard.GlobalHotKeys({
-            '<f9>': self.on_hotkey_triggered
-        })
-        self.keyboard_listener.start()
+        # 2. 단일 통합 전역 키보드 리스너 구동 (F9 핫키 감지 및 PrintScreen 차단 통합)
+        self.start_keyboard_listener()
+
+    def start_keyboard_listener(self):
+        """
+        단 하나의 전역 키보드 리스너를 가동하여 F9 핫키 감지 및 PrintScreen 차단을 일괄 처리합니다.
+        pynput 리스너 중복 구동으로 인한 윈도우 훅 충돌을 원천 차단합니다.
+        """
+        if self.keyboard_listener:
+            return
+
+        def win32_filter(msg, data):
+            # 1. F9 단축키 처리 (VK_F9 = 0x78)
+            # WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104
+            if data.vkCode == 0x78:
+                if msg in (0x0100, 0x0104):
+                    self.root.after(0, self.on_hotkey_triggered)
+                return False  # 시스템 전파 차단하여 핫키만 삼킴
+                
+            # 2. PrintScreen 차단 처리 (VK_SNAPSHOT = 0x2C)
+            if data.vkCode == 0x2C:
+                cur_cfg = load_config()
+                if cur_cfg.get("block_other_captures", False):
+                    print("[차단] Print Screen 키 입력 무효화 완료")
+                    return False  # 시스템 전파 차단하여 캡처 방지
+                    
+            return True
+
+        try:
+            self.keyboard_listener = keyboard.Listener(win32_event_filter=win32_filter)
+            self.keyboard_listener.start()
+            print("[Keyboard] 단일 통합 키보드 리스너 구동 시작")
+        except Exception as e:
+            print(f"[Keyboard] 통합 키보드 리스너 기동 실패: {e}")
         
         # 3. 최초 실행 시 시작 프로그램 자동 등록 (아직 등록 안 된 경우만)
         # 트레이 메뉴의 '윈도우 시작 시 자동 실행' 항목에서 언제든 해제 가능합니다.
@@ -530,7 +525,7 @@ class PrivacyMaskerApp:
 
     def start_capture_blocker(self):
         """
-        설정 상태에 맞춰 백그라운드 차단 스레드 및 PrintScreen 차단용 키보드 리스너를 켭니다.
+        설정 상태에 맞춰 백그라운드 차단 스레드를 켭니다.
         """
         self.config = load_config()
         enabled = self.config.get("block_other_captures", False)
@@ -543,43 +538,12 @@ class PrivacyMaskerApp:
                 self.block_thread.start()
         else:
             self.block_running = False
-            
-        # 2. PrintScreen 단축키 전역 차단 리스너 가동
-        if enabled:
-            if not self.prtscr_listener:
-                def win32_filter(msg, data):
-                    # VK_SNAPSHOT = 0x2C (Print Screen 키)
-                    if data.vkCode == 0x2C:
-                        cur_cfg = load_config()
-                        if cur_cfg.get("block_other_captures", False):
-                            print("[차단] Print Screen 키 입력 무효화 완료")
-                            return False # 이벤트를 차단(suppress)
-                    return True
-                
-                try:
-                    self.prtscr_listener = keyboard.Listener(win32_event_filter=win32_filter)
-                    self.prtscr_listener.start()
-                except Exception as e:
-                    print(f"PrintScreen 차단 리스너 기동 실패: {e}")
-        else:
-            if self.prtscr_listener:
-                try:
-                    self.prtscr_listener.stop()
-                except:
-                    pass
-                self.prtscr_listener = None
 
     def stop_capture_blocker(self):
         """
         차단 관련 자원을 정지하고 소거합니다.
         """
         self.block_running = False
-        if self.prtscr_listener:
-            try:
-                self.prtscr_listener.stop()
-            except:
-                pass
-            self.prtscr_listener = None
 
     def capture_block_worker(self):
         """

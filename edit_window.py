@@ -504,62 +504,21 @@ class EditWindow:
         """
         final_img = self.get_final_masked_image()
         
-        # 임시 이미지 파일로 세이브
-        import uuid
-        temp_dir = tempfile.gettempdir()
-        temp_out_path = os.path.join(temp_dir, f"temp_copied_capture_{uuid.uuid4().hex}.png")
-        final_img.save(temp_out_path)
-        
-        # PowerShell 백그라운드 구동으로 .NET 클립보드 이미지 세팅
-        # Set-Clipboard -Path 명령어는 파일 경로 자체를 복사하므로 메신저 등에서 Ctrl+V가 불가능합니다.
-        # 따라서 [System.Windows.Forms.Clipboard]::SetImage를 이용해 이미지 비트맵 픽셀 데이터를 직접 탑재합니다.
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        # 경로 백슬래시 처리
-        safe_path = temp_out_path.replace("\\", "\\\\")
-        # DataObject를 사용해 이미지와 고유 시그니처 텍스트를 동시에 클립보드에 안전하게 삽입
-        ps_cmd = (
-            "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
-            "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing'); "
-            f"$img = [System.Drawing.Image]::FromFile('{safe_path}'); "
-            "$dataObj = New-Object System.Windows.Forms.DataObject; "
-            "$dataObj.SetImage($img); "
-            "[void]$dataObj.SetText('PrivacyMasker_Signature_829cf3', [System.Windows.Forms.TextDataFormat]::Text); "
-            "[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true); "
-            "$img.Dispose();"
-        )
-        
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            ps_cmd
-        ]
-        
+        from config_manager import copy_image_to_clipboard
         try:
-            result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
-                
-            if result.returncode == 0:
+            if copy_image_to_clipboard(final_img):
                 if show_popup:
                     messagebox.showinfo("완료", "마스킹된 이미지가 클립보드에 복사되었습니다!\n다른 앱에 바로 붙여넣기(Ctrl+V) 하세요.", parent=self.root)
             else:
                 if show_popup:
-                    messagebox.showerror("실패", f"클립보드 복사 중 파워쉘 오류 발생: {result.stderr}", parent=self.root)
+                    messagebox.showerror("실패", "클립보드 복사 중 오류 발생: 클립보드 데이터 탑재 실패", parent=self.root)
                 else:
-                    print(f"[클립보드 자동복사 오류] {result.stderr}")
+                    print("[클립보드 자동복사 오류] 클립보드 데이터 탑재 실패")
         except Exception as e:
             if show_popup:
                 messagebox.showerror("오류", f"클립보드 복사 중 예외 발생: {str(e)}", parent=self.root)
             else:
                 print(f"[클립보드 자동복사 예외] {e}")
-        finally:
-            if os.path.exists(temp_out_path):
-                try:
-                    os.remove(temp_out_path)
-                except:
-                    pass
 
     def save_file(self):
         """

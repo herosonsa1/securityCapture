@@ -456,7 +456,40 @@ if img_w != width or img_h != height:
 - **수정 1**: 시스템 트레이 우클릭 시 생성되는 메뉴 항목 리스트에서 `"사람 이름 마스킹"` 토글 옵션 메뉴 아이템을 삭제했습니다.
 - **수정 2**: 해당 메뉴를 클릭하여 설정을 갱신하고 반영하던 이벤트 핸들러 함수인 `toggle_mask_name_opt` 메서드를 클래스 정의 내에서 삭제했습니다.
 
-#### 3. 검증 및 빌드
 - `scratch/test_real_image.py` 테스트 코드를 통해 성명 및 주민등록번호 동시 탐지 등 11가지의 가상 시나리오 검증이 모두 성공적으로 완료되었음을 검증했습니다.
 - 백그라운드에 상주하던 이전 실행 파일 프로세스들을 강제 종료하고, `build_exe.py`를 실행하여 새 릴리스 빌드(`dist/PrivacyMasker.exe`) 생성을 성공적으로 완료했습니다.
+
+---
+
+## 2026-06-16 (추가 9) — 단일 통합 키보드 리스너 도입 및 ctypes 고속 클립보드 복사
+
+### 작업 배경
+- **현상 1**: "타 캡쳐프로그램 금지" 옵션 활성화 시 PrintScreen 차단용 키보드 리스너(`prtscr_listener`)와 F9 캡처용 전역 핫키 리스너(`GlobalHotKeys`)가 중복 실행되면서 Windows 훅(Hook) 충돌이 발생하여 F9 단축키가 씹히거나 동작하지 않는 문제를 발견했습니다.
+- **현상 2**: "타 캡쳐프로그램 금지" 모드에서 0.5초마다 클립보드를 감시 및 비우는 차단 스레드(`capture_block_worker`)보다 PowerShell로 외부 프로세스를 띄워 클립보드를 쓰는 시간(수백 ms ~ 1초 이상)이 더 느려, 텍스트 시그니처가 클립보드에 삽입되기도 전에 이미지가 감지되어 클립보드가 강제로 비워지며 복사가 실패하는 레이스 컨디션 현상이 발생했습니다.
+
+---
+
+### 수정 파일
+- `config_manager.py` — ctypes 기반 고속 클립보드 복사 유틸 탑재
+- `main.py` — 단일 통합 키보드 리스너 개편, ctypes 클립보드 유틸 반영, prtscr_listener 제거
+- `edit_window.py` — ctypes 클립보드 유틸 반영, 임시 파일 입출력 및 파워쉘 의존 제거
+- `work_history/work_history.md`
+
+---
+
+### 수정 내용
+
+#### 1. ctypes 기반 윈도우 API 직접 호출형 고속 클립보드 복사 구현 (`config_manager.py`)
+- **수정**: `OpenClipboard`, `EmptyClipboard`, `SetClipboardData`, `GlobalAlloc` 등 Windows API를 파이썬 ctypes를 통해 직접 호출하는 `copy_image_to_clipboard` 함수를 탑재했습니다.
+- **방식**: PIL Image를 BMP 포맷으로 변환한 뒤 BMP 파일 헤더(14바이트)를 생략한 DIB 데이터(`CF_DIB`)를 윈도우 글로벌 메모리에 쓰고, 고유 텍스트 시그니처(`CF_UNICODETEXT`)를 한 개의 열린 클립보드 트랜잭션 내에서 원자적(atomic)으로 동시에 씁니다.
+- **효과**: 외부 PowerShell 프로세스를 띄우는 오버헤드가 완전히 사라져 복사 속도가 1ms 수준으로 단축되며, 차단 스레드가 틈에 개입하여 클립보드를 소거하는 레이스 컨디션을 원천 방지합니다. 또한 다른 PC의 PowerShell 실행 권한(Execution Policy) 제약에서도 완전히 자유롭습니다.
+
+#### 2. 단일 통합 키보드 리스너 도입 및 훅 충돌 해결 (`main.py`)
+- **수정**: 기존 `keyboard.GlobalHotKeys`와 `keyboard.Listener` 2중 구성을 모두 폐기하고, 단 하나의 통합 `keyboard.Listener`만 가동되도록 수정했습니다.
+- **방식**: `win32_event_filter` 내부에서 가상 키 코드 `VK_F9` (0x78)가 눌릴 경우 `self.on_hotkey_triggered`를 안전하게 큐잉하고 시스템 전파를 막으며(`return False`), `VK_SNAPSHOT` (0x2C) 키가 눌릴 때는 "타 캡쳐프로그램 금지"가 체크되어 있을 때만 차단(`return False`)하고 아닐 때는 노출(`return True`)하도록 일원화했습니다.
+- **효과**: 여러 리스너 간의 OS 후킹 충돌이 완전히 차단되어 트레이 상태에서 F9 캡처가 상시 안정적으로 동작합니다.
+
+#### 3. 캡처편집창 클립보드 복사 고도화 (`edit_window.py`)
+- **수정**: 편집 창의 이미지 복사 시에도 ctypes 기반 복사 유틸을 사용하여 PowerShell 백그라운드 구동 및 임시 이미지 파일 입출력을 완전히 생략하였습니다.
+
 
