@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageDraw, ImageTk
 from masking_core import run_ocr, detect_personal_info, apply_mask, detect_personal_info_multi_stage
 from config_manager import load_config, save_config
@@ -101,7 +101,27 @@ class EditWindow:
             text="개인정보 자동 탐지 중입니다. 잠시만 기다려주세요...", 
             fg="#e0e0e0", bg="#1e1e1e", font=("맑은 고딕", 10, "bold")
         )
-        self.info_label.pack(pady=10)
+        self.info_label.pack(pady=5)
+
+        # 다크 테마에 맞는 파란색 스타일 프로그레스 바 추가
+        self.style = ttk.Style()
+        self.style.theme_use('default')
+        self.style.configure(
+            "TProgressbar", 
+            thickness=6, 
+            troughcolor="#1e1e1e", 
+            background="#007acc", 
+            lightcolor="#007acc", 
+            darkcolor="#007acc"
+        )
+        self.progress = ttk.Progressbar(
+            self.root, 
+            mode='indeterminate', 
+            length=350, 
+            style="TProgressbar"
+        )
+        self.progress.pack(pady=5)
+        self.progress.start(10) # 10ms마다 자연스러운 무한 반복 애니메이션 동작
         
         # 4. 하단 툴바 레이아웃 (다크 모드 스타일 버튼) - 창 세로 크기 감소 시 툴바 잘림을 막기 위해 canvas_frame보다 먼저 아래쪽에 팩(pack)합니다.
         toolbar = tk.Frame(self.root, bg="#1e1e1e")
@@ -248,6 +268,15 @@ class EditWindow:
         if not self.root:
             self.safe_remove_temp_file(temp_img_path)
             return
+
+        # 백그라운드 분석이 완료되었으므로 프로그레스 바 중지 및 파괴
+        if hasattr(self, 'progress') and self.progress:
+            try:
+                self.progress.stop()
+                self.progress.destroy()
+                self.progress = None
+            except Exception as e:
+                print(f"프로그레스 바 제거 중 예외: {e}")
             
         if ocr_result.get("status") == "success":
             # 디버깅용 OCR 결과 로컬 세이브
