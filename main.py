@@ -652,11 +652,56 @@ class PrivacyMaskerApp:
 
     def capture_block_worker(self):
         """
-        0.5초마다 타 캡처 도구 프로세스를 강제 종료합니다.
+        0.1초마다 실행 중인 프로세스 목록을 ctypes로 가볍게 스캔하여,
+        차단 대상 캡처 프로그램이 발견되면 즉시 강제 종료하고 안내 경고창을 띄웁니다.
         """
         import time
         import subprocess
+        import ctypes
         
+        # 1. ctypes 기반 고속 프로세스 스캔 헬퍼 정의
+        def get_running_block_targets(target_names):
+            TH32CS_SNAPPROCESS = 0x00000002
+            
+            class PROCESSENTRY32(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", ctypes.c_ulong),
+                    ("cntUsage", ctypes.c_ulong),
+                    ("th32ProcessID", ctypes.c_ulong),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", ctypes.c_ulong),
+                    ("cntThreads", ctypes.c_ulong),
+                    ("th32ParentProcessID", ctypes.c_ulong),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", ctypes.c_ulong),
+                    ("szExeFile", ctypes.c_char * 260)
+                ]
+                
+            CreateToolhelp32Snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot
+            Process32First = ctypes.windll.kernel32.Process32First
+            Process32Next = ctypes.windll.kernel32.Process32Next
+            CloseHandle = ctypes.windll.kernel32.CloseHandle
+            
+            hProcessSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if hProcessSnap == -1:
+                return []
+                
+            pe32 = PROCESSENTRY32()
+            pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
+            
+            found_targets = []
+            if Process32First(hProcessSnap, ctypes.byref(pe32)):
+                while True:
+                    exe_name = pe32.szExeFile.decode('ansi', errors='ignore').lower()
+                    for t_name in target_names:
+                        if exe_name == t_name.lower():
+                            found_targets.append(t_name)
+                    if not Process32Next(hProcessSnap, ctypes.byref(pe32)):
+                        break
+                        
+            CloseHandle(hProcessSnap)
+            return found_targets
+
         # 강제 차단할 캡처 프로그램 목록
         block_processes = [
             "SnippingTool.exe",        # 윈도우 기본 캡처 도구
@@ -672,26 +717,34 @@ class PrivacyMaskerApp:
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
         
-        print("[Blocker] 감시 스레드 구동 시작")
+        print("[Blocker] 감시 스레드 구동 시작 (주기: 0.1초)")
         
         while self.block_running:
-            # 1. 캡처 프로그램 프로세스 강제 종료 시도
-            kill_cmds = []
-            for p in block_processes:
-                kill_cmds.append(f"/im {p}")
-            cmd_args = ["taskkill", "/F"] + kill_cmds
+            # 2. 실행 중인 차단 대상 캡처 프로그램이 있는지 스냅샷 검사 (1ms 이하 소요)
+            detected = get_running_block_targets(block_processes)
             
-            try:
-                subprocess.Popen(
-                    cmd_args, 
-                    startupinfo=startupinfo, 
-                    stdout=subprocess.DEVNULL, 
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception as e:
-                print(f"[Blocker] taskkill 오류: {e}")
+            if detected:
+                # 3. 감지된 프로세스가 있는 경우에만 taskkill 비동기 실행 및 알림 연동
+                kill_cmds = []
+                for p in detected:
+                    kill_cmds.append(f"/im {p}")
+                cmd_args = ["taskkill", "/F"] + kill_cmds
                 
-            time.sleep(0.5)
+                try:
+                    subprocess.Popen(
+                        cmd_args, 
+                        startupinfo=startupinfo, 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL
+                    )
+                    print(f"[Blocker] 감지되어 즉시 차단 명령 전송: {detected}")
+                    # 비동기 경고창 팝업 연동
+                    self.root.after(0, self.show_block_warning)
+                except Exception as e:
+                    print(f"[Blocker] taskkill 오류: {e}")
+                    
+            # 4. 0.1초 초고속 대기
+            time.sleep(0.1)
             
         print("[Blocker] 감시 스레드 구동 종료")
 
