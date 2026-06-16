@@ -171,5 +171,29 @@ def run_simulated_tests():
     for m in mask_10:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
 
+    # 시나리오 11: 날짜 + 시간 데이터 오탐 방지 검증
+    # [보험기간] [2025/11/07] [24:00] ~ [2026/11/07] [24:00]
+    # [사고일시] [2026-06-01] [오전] [04:30]
+    # 예상 결과: 감지된 마스킹 영역 수: 0 (날짜+시간 결합 형태는 생년월일로 오탐되지 않음)
+    print("\n[시나리오 11] 날짜 + 시간 데이터 오탐 방지 검증")
+    words_11 = [
+        {"text": "보험기간", "x": 10, "y": 1000, "width": 50, "height": 20},
+        {"text": "2025/11/07", "x": 70, "y": 1000, "width": 80, "height": 20},
+        {"text": "24:00", "x": 160, "y": 1000, "width": 40, "height": 20},
+        {"text": "~", "x": 210, "y": 1000, "width": 10, "height": 20},
+        {"text": "2026/11/07", "x": 230, "y": 1000, "width": 80, "height": 20},
+        {"text": "24:00", "x": 320, "y": 1000, "width": 40, "height": 20},
+        
+        {"text": "사고일시", "x": 10, "y": 1030, "width": 50, "height": 20},
+        {"text": "2026-06-01", "x": 70, "y": 1030, "width": 80, "height": 20},
+        {"text": "오전", "x": 160, "y": 1030, "width": 30, "height": 20},
+        {"text": "04:30", "x": 200, "y": 1030, "width": 40, "height": 20}
+    ]
+    ocr_res_11 = {"status": "success", "words": words_11}
+    mask_11, label_11 = detect_personal_info(ocr_res_11)
+    print("  * 감지된 마스킹 영역 수:", len(mask_11))
+    for m in mask_11:
+        print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
+
 if __name__ == "__main__":
     run_simulated_tests()

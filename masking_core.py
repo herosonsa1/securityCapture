@@ -73,6 +73,9 @@ VEHICLE_PATTERN = re.compile(
 # IP 주소 패턴 (IPv4)
 IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
 
+# 시간 패턴 (HH:MM 또는 오전/오후 HH:MM 또는 HH시)
+TIME_PATTERN = re.compile(r'\d{1,2}:\d{2}|오전|오후|\b\d{1,2}시\b')
+
 # 주소 패턴 (시/도 및 구/동/읍/면/로/길 행정구역 특징 매칭)
 ADDRESS_PATTERN = re.compile(r'\b[가-힣]{2,4}[시도]\b.*\b[가-힣]+[구동읍면로길]\b')
 
@@ -1756,8 +1759,36 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
                 ]:
                     if pattern.search(text_no_space) or pattern.search(text_with_space):
                         if p_type == "birth":
-                            # 구분자 2개 이상 + 달(01~12)/일(01~31) 범위 검증으로 버전번호 오탐 방지
                             matched_text = text_no_space if pattern.search(text_no_space) else text_with_space
+                            
+                            # 1. 자체 텍스트에 시간(HH:MM 등) 정보가 포함되어 있다면 생년월일이 아니므로 스킵
+                            if TIME_PATTERN.search(matched_text):
+                                continue
+
+                            # 2. 인접 영역(동일 행의 바로 우측 단어들)에 시간 또는 일시 정보가 있다면 스킵
+                            last_word = sub_words[-1]
+                            # 같은 행의 다른 단어들 중 last_word 우측에 있는 단어 탐색
+                            right_neighbors = [
+                                w for w in line 
+                                if w['x'] > last_word['x'] + last_word['width'] * 0.5
+                            ]
+                            right_neighbors.sort(key=lambda w: w['x'])
+                            
+                            is_date_time = False
+                            for nw in right_neighbors:
+                                # 너무 멀리 떨어진 단어는 제외 (최대 180px)
+                                gap = nw['x'] - (last_word['x'] + last_word['width'])
+                                if gap > 180:
+                                    break
+                                nw_clean = re.sub(r'\s+', '', nw['text'])
+                                if TIME_PATTERN.search(nw_clean) or any(k in nw_clean for k in ["시", "분", "초", "오전", "오후"]):
+                                    is_date_time = True
+                                    break
+                                    
+                            if is_date_time:
+                                continue
+
+                            # 구분자 2개 이상 + 달(01~12)/일(01~31) 범위 검증으로 버전번호 오탐 방지
                             separators = re.findall(r'[-./]', matched_text)
                             if len(separators) < 2:
                                 continue
