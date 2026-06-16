@@ -285,6 +285,22 @@ def run_ocr(image_path):
         if img_pil.width > border_crop * 2 and img_pil.height > border_crop * 2:
             img_pil = img_pil.crop((border_crop, border_crop, img_pil.width - border_crop, img_pil.height - border_crop))
 
+        # ── 테두리(파란색/하늘색/옅은 회색) 제거 컬러 필터링 적용 ─────────────────
+        # 콤보박스나 입력 필드의 외곽선이 글자 획과 맞닿아 뭉개지는 현상을 방지합니다.
+        img_rgb = img_pil.convert("RGB")
+        pixels = img_rgb.load()
+        for y in range(img_rgb.height):
+            for x in range(img_rgb.width):
+                pr, pg, pb = pixels[x, y]
+                # 하늘색/파란색 테두리 조건 (#78C5E7 계열 등 드롭다운/입력 박스 테두리선 제거)
+                if pb > 150 and pg > 150 and pr < 180 and pb > pr + 30:
+                    pixels[x, y] = (255, 255, 255)
+                # 회색 테두리선 조건 (옅은 회색 외곽선 제거)
+                elif 180 <= pr <= 220 and 180 <= pg <= 220 and 180 <= pb <= 220 and abs(pr - pb) < 10:
+                    pixels[x, y] = (255, 255, 255)
+        # 필터링 완료된 이미지를 확장 단계에 사용
+        img_pil = img_rgb
+
         new_w = int(img_pil.width * scale_factor)
         new_h = int(img_pil.height * scale_factor)
         # LANCZOS 필터로 고품질 확대 (픽셀 깨짐, 계단 현상 방지)
