@@ -123,7 +123,7 @@ class PrivacyMaskerApp:
             import os
             import subprocess
             import uuid
-            from masking_core import run_ocr, detect_personal_info, apply_mask
+            from masking_core import run_ocr, detect_personal_info, apply_mask, detect_personal_info_multi_stage
             from config_manager import load_config
             
             # 알림 발송용 유틸리티 함수
@@ -147,10 +147,6 @@ class PrivacyMaskerApp:
             original_image = crop_area["image"]
             original_image.save(temp_in_path)
             
-            # 2. OCR 수행
-            ocr_engine = config.get("ocr_engine", "windows")
-            ocr_result = run_ocr(temp_in_path, engine=ocr_engine)
-            
             # 임시 파일 백그라운드 안전 삭제
             def safe_remove(path):
                 import time
@@ -164,20 +160,20 @@ class PrivacyMaskerApp:
                     else:
                         break
             
+            # 2. 다단계 OCR 및 마스킹 수행
+            mask_boxes, _label_regions, ocr_result = detect_personal_info_multi_stage(temp_in_path, name_mask_style, mask_type)
+            
             if ocr_result.get("status") != "success":
                 notify_msg("분석 실패", "OCR 분석에 실패하여 마스킹을 적용하지 못했습니다.")
                 safe_remove(temp_in_path)
                 return
                 
-            # 3. 개인정보 식별 및 마스킹 영역 좌표 생성
-            # detect_personal_info는 (mask_regions, label_regions) 튜플을 반환합니다.
-            # 백그라운드 즉시 복사 모드에서는 label_regions(항목명 강조)가 불필요하므로 mask_boxes만 사용합니다.
-            mask_boxes, _label_regions = detect_personal_info(ocr_result, name_mask_style)
+            safe_remove(temp_in_path)
             
-            # 4. 이미지 마스킹 필터 적용
+            # 3. 이미지 마스킹 필터 적용
             final_img = apply_mask(original_image, mask_boxes, mask_type=mask_type, mosaic_size=10)
             
-            # 5. 클립보드 복사용 임시 세이브
+            # 4. 클립보드 복사용 임시 세이브
             temp_out_path = os.path.join(temp_dir, f"temp_bg_copied_capture_{unique_id}.png")
             final_img.save(temp_out_path)
             
@@ -232,16 +228,6 @@ class PrivacyMaskerApp:
         if self.tray_icon:
             self.tray_icon.update_menu()
 
-    def change_ocr_engine(self, engine_name):
-        """
-        트레이 아이콘의 'OCR 엔진 변경' 메뉴 선택 시 엔진 설정을 업데이트하고 저장합니다.
-        """
-        self.config = load_config()
-        self.config["ocr_engine"] = engine_name
-        save_config(self.config)
-        if self.tray_icon:
-            self.tray_icon.update_menu()
-
     def open_last_capture_editor(self):
         """
         가장 최근에 캡처한 이미지 데이터를 복원하여 편집창을 강제 개시합니다.
@@ -278,11 +264,6 @@ class PrivacyMaskerApp:
             pystray.MenuItem("화면 캡처 (F9)", lambda icon, item: self.on_hotkey_triggered(), default=True),
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("OCR 엔진 변경", pystray.Menu(
-                pystray.MenuItem("Windows OCR (기본)", lambda item: self.change_ocr_engine("windows"), checked=lambda item: self.config.get("ocr_engine", "windows") == "windows"),
-                pystray.MenuItem("EasyOCR (딥러닝)", lambda item: self.change_ocr_engine("easyocr"), checked=lambda item: self.config.get("ocr_engine", "windows") == "easyocr")
-            )),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(

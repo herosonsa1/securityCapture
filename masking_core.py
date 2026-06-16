@@ -227,63 +227,13 @@ def verify_rrn_checksum(digits_only):
     return True
 
 
-_easyocr_reader = None
-
-def get_easyocr_reader():
-    """
-    EasyOCR Reader의 싱글톤 인스턴스를 반환합니다.
-    최초 호출 시 메모리에 로드하고, 학습된 한글/영어 모델 가중치를 로드합니다.
-    """
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        import easyocr
-        # CPU 환경에서 동작 설정 (gpu=False)
-        _easyocr_reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
-    return _easyocr_reader
-
-def run_easy_ocr_engine(image_path):
-    """
-    EasyOCR 엔진을 사용하여 단어 인식 결과를 추출하고, 
-    기존 Windows OCR 포맷인 {"status": "success", "words": [...]} 형태로 정규화하여 반환합니다.
-    """
-    try:
-        reader = get_easyocr_reader()
-        # image_path에 해당하는 이미지 로드 후 텍스트 및 바운딩 박스 검출
-        results = reader.readtext(image_path)
-        words = []
-        for bbox, text, conf in results:
-            x_coords = [p[0] for p in bbox]
-            y_coords = [p[1] for p in bbox]
-            min_x = min(x_coords)
-            max_x = max(x_coords)
-            min_y = min(y_coords)
-            max_y = max(y_coords)
-            
-            words.append({
-                "text": text.strip(),
-                "x": int(min_x),
-                "y": int(min_y),
-                "width": int(max_x - min_x),
-                "height": int(max_y - min_y)
-            })
-            
-        return {"status": "success", "words": words}
-    except Exception as e:
-        print(f"EasyOCR 구동 중 실패: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-def run_ocr(image_path, engine="windows"):
-
+def run_ocr(image_path):
     """
     Windows 내장 OCR 엔진의 인식률을 극대화하기 위해 이미지를 고품질로 4배 스케일업(Scale-up)하고,
     [autocontrast → UnsharpMask 선명화 → Otsu 근사 자동 임계값 이진화] 다단계 전처리를 거친 뒤
     PowerShell OCR을 호출합니다. 획득한 단어 좌표계를 원래 해상도에 맞춰 스케일다운 보정하여 반환합니다.
     OCR 인식 결과 단어가 5개 미만인 경우(어두운 배경 등 이진화 실패 의심), 이미지 반전 후 2단계 재시도합니다.
     """
-    if engine == "easyocr":
-        return run_easy_ocr_engine(image_path)
-
     import tempfile
 
     scale_factor = 4.0  # 3.5 → 4.0: 소형 글자 및 저해상도 캡처 인식률 향상
@@ -1911,3 +1861,76 @@ def apply_mask(image, regions, mask_type="mosaic", mosaic_size=10):
             img_masked.paste(mosaic, box)
             
     return img_masked
+
+
+def detect_personal_info_multi_stage(image_path, name_mask_style="middle", mask_type="mosaic"):
+    """
+    1차 OCR 및 마스킹 적용 후, 명암비 스트레칭 왜곡 해소 효과를 이용해 2차 OCR 및 마스킹 분석을 연속으로 수행합니다.
+    이를 통해 대비 왜곡으로 인해 1차에서 인식에 실패하여 누락되었던 개인정보(예: 면허번호, 연락처 등)를
+    다단계(Iterative)로 구제하여 누락률을 최소화합니다.
+    """
+    import tempfile
+    import uuid
+    from PIL import Image, ImageDraw
+    
+    # 1. 1차 OCR 수행
+    ocr_result_1 = run_ocr(image_path)
+    if ocr_result_1.get("status") != "success":
+        return [], [], ocr_result_1
+
+    mask_regions_1, label_regions_1 = detect_personal_info(ocr_result_1, name_mask_style)
+    
+    # 누적할 최종 마스킹 영역 및 라벨 영역
+    accumulated_masks = list(mask_regions_1)
+    accumulated_labels = list(label_regions_1)
+    
+    # 2차 다단계 검증 시도
+    temp_img_path_2 = None
+    try:
+        # 1차 마스킹 결과 이미지 임시 생성
+        with Image.open(image_path) as img:
+            highlighted = img.copy().convert("RGBA")
+            yellow_overlay = Image.new("RGBA", highlighted.size, (0, 0, 0, 0))
+            draw_yellow = ImageDraw.Draw(yellow_overlay)
+            
+            # 1차 강조 표시 적용
+            for box in label_regions_1:
+                draw_yellow.rectangle(
+                    [box['x'], box['y'], box['x'] + box['width'] - 1, box['y'] + box['height'] - 1],
+                    fill=(255, 215, 0, 110), outline=(255, 165, 0, 240), width=2
+                )
+            highlighted = Image.alpha_composite(highlighted, yellow_overlay).convert("RGB")
+            
+            # 1차 실제 마스킹 적용
+            img_masked_1 = apply_mask(highlighted, mask_regions_1, mask_type=mask_type, mosaic_size=10)
+            
+            # 2차 분석용 임시 파일 저장
+            temp_dir = tempfile.gettempdir()
+            temp_img_path_2 = os.path.join(temp_dir, f"temp_ocr_stage2_{uuid.uuid4().hex}.png")
+            img_masked_1.save(temp_img_path_2)
+            
+            # 2차 OCR 구동
+            ocr_result_2 = run_ocr(temp_img_path_2)
+            
+            if ocr_result_2.get("status") == "success":
+                mask_regions_2, label_regions_2 = detect_personal_info(ocr_result_2, name_mask_style)
+                
+                # 2차 추가 검출 영역 누적
+                for m2 in mask_regions_2:
+                    # 중복 방지를 위한 단순 (x, y, w, h) 체크
+                    if not any(m1['x'] == m2['x'] and m1['y'] == m2['y'] and m1['width'] == m2['width'] and m1['height'] == m2['height'] for m1 in accumulated_masks):
+                        accumulated_masks.append(m2)
+                for l2 in label_regions_2:
+                    if not any(l1['x'] == l2['x'] and l1['y'] == l2['y'] and l1['width'] == l2['width'] and l1['height'] == l2['height'] for l1 in accumulated_labels):
+                        accumulated_labels.append(l2)
+                        
+    except Exception as e:
+        print(f"[다단계 OCR] 2차 마스킹 분석 중 실패 (1차 결과로 유지): {e}")
+    finally:
+        if temp_img_path_2 and os.path.exists(temp_img_path_2):
+            try:
+                os.remove(temp_img_path_2)
+            except:
+                pass
+                
+    return accumulated_masks, accumulated_labels, ocr_result_1
