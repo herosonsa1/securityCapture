@@ -519,11 +519,15 @@ class EditWindow:
         
         # 경로 백슬래시 처리
         safe_path = temp_out_path.replace("\\", "\\\\")
+        # DataObject를 사용해 이미지와 고유 시그니처 텍스트를 동시에 클립보드에 안전하게 삽입
         ps_cmd = (
             "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
             "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing'); "
             f"$img = [System.Drawing.Image]::FromFile('{safe_path}'); "
-            "[System.Windows.Forms.Clipboard]::SetImage($img); "
+            "$dataObj = New-Object System.Windows.Forms.DataObject; "
+            "$dataObj.SetImage($img); "
+            "[void]$dataObj.SetText('PrivacyMasker_Signature_829cf3', [System.Windows.Forms.TextDataFormat]::Text); "
+            "[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true); "
             "$img.Dispose();"
         )
         
@@ -534,20 +538,8 @@ class EditWindow:
             ps_cmd
         ]
         
-        # 자체 복사이므로 임시로 클립보드 파기 감시 우회 활성화
-        if self.app_controller:
-            self.app_controller.skip_clipboard_clear = True
-        
         try:
             result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
-            
-            # 복사가 완료된 후 0.8초 딜레이를 거쳐 차단 스레드의 감시 재개
-            if self.app_controller:
-                def reset_flag():
-                    import time
-                    time.sleep(0.8)
-                    self.app_controller.skip_clipboard_clear = False
-                threading.Thread(target=reset_flag, daemon=True).start()
                 
             if result.returncode == 0:
                 if show_popup:

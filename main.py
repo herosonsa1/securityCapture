@@ -191,11 +191,15 @@ class PrivacyMaskerApp:
             startupinfo.wShowWindow = subprocess.SW_HIDE
             
             safe_path = temp_out_path.replace("\\", "\\\\")
+            # DataObject를 통해 이미지와 고유 시그니처 텍스트를 함께 클립보드에 삽입
             ps_cmd = (
                 "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
                 "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing'); "
                 f"$img = [System.Drawing.Image]::FromFile('{safe_path}'); "
-                "[System.Windows.Forms.Clipboard]::SetImage($img); "
+                "$dataObj = New-Object System.Windows.Forms.DataObject; "
+                "$dataObj.SetImage($img); "
+                "[void]$dataObj.SetText('PrivacyMasker_Signature_829cf3', [System.Windows.Forms.TextDataFormat]::Text); "
+                "[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true); "
                 "$img.Dispose();"
             )
             
@@ -206,18 +210,8 @@ class PrivacyMaskerApp:
                 ps_cmd
             ]
             
-            # 자체 복사이므로 임시로 클립보드 파기 감시 우회 활성화
-            self.skip_clipboard_clear = True
-            
             try:
                 result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
-                
-                # 복사가 실행된 후 0.8초 딜레이를 거쳐 차단 스레드의 감시 재개
-                def reset_flag():
-                    import time
-                    time.sleep(0.8)
-                    self.skip_clipboard_clear = False
-                threading.Thread(target=reset_flag, daemon=True).start()
                 if result.returncode == 0:
                     cnt = len(mask_boxes)
                     if cnt > 0:
@@ -649,18 +643,40 @@ class PrivacyMaskerApp:
             except Exception as e:
                 print(f"[Blocker] taskkill 오류: {e}")
                 
-            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화, 단 skip_clipboard_clear가 켜져 있으면 우회 허용)
-            if not self.skip_clipboard_clear:
-                try:
-                    if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
+            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화)
+            try:
+                if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
+                    is_our_copy = False
+                    # 클립보드를 열고 데이터 형식 검사
+                    if OpenClipboard(None):
+                        try:
+                            GetClipboardData = ctypes.windll.user32.GetClipboardData
+                            GlobalLock = ctypes.windll.kernel32.GlobalLock
+                            GlobalUnlock = ctypes.windll.kernel32.GlobalUnlock
+                            # CF_UNICODETEXT = 13 포맷으로 저장된 시그니처 텍스트 확인
+                            h_clip = GetClipboardData(13)
+                            if h_clip:
+                                p_box = GlobalLock(h_clip)
+                                if p_box:
+                                    try:
+                                        clip_text = ctypes.wstring_at(p_box)
+                                        if "PrivacyMasker_Signature_829cf3" in clip_text:
+                                            is_our_copy = True
+                                    finally:
+                                        GlobalUnlock(h_clip)
+                        finally:
+                            CloseClipboard()
+                            
+                    # 우리 프로그램이 복사한 이미지가 아닐 때만 클립보드를 즉시 비움 (타 캡처 차단)
+                    if not is_our_copy:
                         if OpenClipboard(None):
                             try:
                                 EmptyClipboard()
-                                print("[Blocker] 클립보드 이미지 차단 처리 완료")
+                                print("[Blocker] 타 캡처본으로 감지되어 클립보드 이미지 소거 완료")
                             finally:
                                 CloseClipboard()
-                except Exception as e:
-                    print(f"[Blocker] 클립보드 소거 오류: {e}")
+            except Exception as e:
+                print(f"[Blocker] 클립보드 소거 오류: {e}")
                 
             time.sleep(0.5)
             
