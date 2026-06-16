@@ -277,7 +277,6 @@ class PrivacyMaskerApp:
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
             pystray.MenuItem("타 캡쳐프로그램 금지", self.toggle_block_other_captures, checked=lambda item: self.config.get("block_other_captures", False)),
-            pystray.MenuItem("사람 이름 마스킹", self.toggle_mask_name_opt, checked=lambda item: self.config.get("mask_name", True)),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(
@@ -503,16 +502,6 @@ class PrivacyMaskerApp:
         print("- 트레이 메뉴에서 '윈도우 시작 시 자동 실행' 등록/해제 가능")
         print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
         print("==========================================================")
-
-    def toggle_mask_name_opt(self, icon, item):
-        """
-        트레이 메뉴에서 '사람 이름 마스킹' 메뉴 토글 시 옵션을 활성화/비활성화합니다.
-        """
-        self.config = load_config()
-        self.config["mask_name"] = not self.config.get("mask_name", True)
-        save_config(self.config)
-        if self.tray_icon:
-            self.tray_icon.update_menu()
 
     # ── 타 캡쳐프로그램 금지 옵션 관리 메서드 ───────────────────────────────
     def toggle_block_other_captures(self, icon, item):
