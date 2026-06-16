@@ -14,12 +14,13 @@ class EditWindow:
     캡처된 이미지를 보여주고, 자동 마스킹된 영역을 편집(추가/제거)하며,
     클립보드 복사 또는 파일 저장을 수행하는 모던 편집 GUI 창입니다.
     """
-    def __init__(self, parent, crop_area):
+    def __init__(self, parent, crop_area, app_controller=None):
         self.parent = parent
         self.crop_area = crop_area
         self.original_image = crop_area["image"]
         self.x_offset = crop_area["x"]
         self.y_offset = crop_area["y"]
+        self.app_controller = app_controller
         
         self.root = None
         self.canvas = None
@@ -533,8 +534,21 @@ class EditWindow:
             ps_cmd
         ]
         
+        # 자체 복사이므로 임시로 클립보드 파기 감시 우회 활성화
+        if self.app_controller:
+            self.app_controller.skip_clipboard_clear = True
+        
         try:
             result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
+            
+            # 복사가 완료된 후 0.8초 딜레이를 거쳐 차단 스레드의 감시 재개
+            if self.app_controller:
+                def reset_flag():
+                    import time
+                    time.sleep(0.8)
+                    self.app_controller.skip_clipboard_clear = False
+                threading.Thread(target=reset_flag, daemon=True).start()
+                
             if result.returncode == 0:
                 if show_popup:
                     messagebox.showinfo("완료", "마스킹된 이미지가 클립보드에 복사되었습니다!\n다른 앱에 바로 붙여넣기(Ctrl+V) 하세요.", parent=self.root)

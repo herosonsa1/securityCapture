@@ -23,7 +23,8 @@ def load_config():
         "show_editor": True,
         "mask_type": "black",
         "name_mask_style": "surname",
-        "block_other_captures": False
+        "block_other_captures": False,
+        "mask_name": True
     }
     
     path = get_config_path()

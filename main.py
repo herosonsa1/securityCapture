@@ -47,6 +47,9 @@ class PrivacyMaskerApp:
         self.block_thread = None
         self.block_running = False
         self.prtscr_listener = None
+        
+        # 자체 복사 시 클립보드 보호 차단 우회 플래그
+        self.skip_clipboard_clear = False
 
     def create_tray_image(self):
         """
@@ -107,8 +110,8 @@ class PrivacyMaskerApp:
                     self.run_background_masking_flow(crop_area)
                     break
                     
-                # 2. 마스킹 편집기 GUI 창 표시
-                edit_win = EditWindow(self.root, crop_area)
+                # 2. 마스킹 편집기 GUI 창 표시 (app_controller로 self 전달)
+                edit_win = EditWindow(self.root, crop_area, app_controller=self)
                 self.current_edit_win = edit_win
                 try:
                     # edit_win.show()는 편집이 끝나고 창이 닫히면 "다시 캡처" 여부 플래그(bool)를 리턴합니다.
@@ -203,8 +206,18 @@ class PrivacyMaskerApp:
                 ps_cmd
             ]
             
+            # 자체 복사이므로 임시로 클립보드 파기 감시 우회 활성화
+            self.skip_clipboard_clear = True
+            
             try:
                 result = subprocess.run(cmd, startupinfo=startupinfo, text=True, capture_output=True)
+                
+                # 복사가 실행된 후 0.8초 딜레이를 거쳐 차단 스레드의 감시 재개
+                def reset_flag():
+                    import time
+                    time.sleep(0.8)
+                    self.skip_clipboard_clear = False
+                threading.Thread(target=reset_flag, daemon=True).start()
                 if result.returncode == 0:
                     cnt = len(mask_boxes)
                     if cnt > 0:
@@ -249,8 +262,8 @@ class PrivacyMaskerApp:
         def run_editor():
             self.capturing = True
             try:
-                # 최근 캡처 복원 편집창 오픈
-                edit_win = EditWindow(self.root, self.last_crop_area)
+                # 최근 캡처 복원 편집창 오픈 (app_controller로 self 전달)
+                edit_win = EditWindow(self.root, self.last_crop_area, app_controller=self)
                 self.current_edit_win = edit_win
                 try:
                     edit_win.show()
@@ -270,6 +283,7 @@ class PrivacyMaskerApp:
             pystray.MenuItem("캡쳐편집창 열기", lambda icon, item: self.open_last_capture_editor()),
             pystray.MenuItem("캡처 후 편집창 열기", self.toggle_show_editor_opt, checked=lambda item: self.config.get("show_editor", True)),
             pystray.MenuItem("타 캡쳐프로그램 금지", self.toggle_block_other_captures, checked=lambda item: self.config.get("block_other_captures", False)),
+            pystray.MenuItem("사람 이름 마스킹", self.toggle_mask_name_opt, checked=lambda item: self.config.get("mask_name", True)),
             pystray.Menu.SEPARATOR,
             # 시작 프로그램 등록/해제 토글 (EXE 단독 배포 지원 — bat 파일 불필요)
             pystray.MenuItem(
@@ -496,6 +510,16 @@ class PrivacyMaskerApp:
         print("- 윈도우 우측 하단 시스템 트레이에서 프로그램을 종료할 수 있습니다.")
         print("==========================================================")
 
+    def toggle_mask_name_opt(self, icon, item):
+        """
+        트레이 메뉴에서 '사람 이름 마스킹' 메뉴 토글 시 옵션을 활성화/비활성화합니다.
+        """
+        self.config = load_config()
+        self.config["mask_name"] = not self.config.get("mask_name", True)
+        save_config(self.config)
+        if self.tray_icon:
+            self.tray_icon.update_menu()
+
     # ── 타 캡쳐프로그램 금지 옵션 관리 메서드 ───────────────────────────────
     def toggle_block_other_captures(self, icon, item):
         """
@@ -625,17 +649,18 @@ class PrivacyMaskerApp:
             except Exception as e:
                 print(f"[Blocker] taskkill 오류: {e}")
                 
-            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화)
-            try:
-                if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
-                    if OpenClipboard(None):
-                        try:
-                            EmptyClipboard()
-                            print("[Blocker] 클립보드 이미지 차단 처리 완료")
-                        finally:
-                            CloseClipboard()
-            except Exception as e:
-                print(f"[Blocker] 클립보드 소거 오류: {e}")
+            # 2. 클립보드 이미지 복사 차단 (우회 저장 시도 무력화, 단 skip_clipboard_clear가 켜져 있으면 우회 허용)
+            if not self.skip_clipboard_clear:
+                try:
+                    if IsClipboardFormatAvailable(CF_BITMAP) or IsClipboardFormatAvailable(CF_DIB):
+                        if OpenClipboard(None):
+                            try:
+                                EmptyClipboard()
+                                print("[Blocker] 클립보드 이미지 차단 처리 완료")
+                            finally:
+                                CloseClipboard()
+                except Exception as e:
+                    print(f"[Blocker] 클립보드 소거 오류: {e}")
                 
             time.sleep(0.5)
             

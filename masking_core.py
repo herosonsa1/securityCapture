@@ -536,12 +536,15 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
 
     # 4. 한글 사람 이름 (글자 수와 무관하게 이름 영역 전체 마스킹)
     elif is_likely_korean_name(text):
-        sub_masks.append({
-            'x': x,
-            'y': y,
-            'width': width,
-            'height': height
-        })
+        from config_manager import load_config
+        config = load_config()
+        if config.get("mask_name", True):
+            sub_masks.append({
+                'x': x,
+                'y': y,
+                'width': width,
+                'height': height
+            })
 
     # 5. 운전면허번호 (포맷: 지역코드2 - 일련번호6 - 검증번호2, 예: 92-123456-74)
     # 지역코드(앞 2자리)만 노출, 이후 전체(일련번호+검증) 마스킹
@@ -975,6 +978,10 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             
         # 레이블별 매칭 로직
         if matched_label_type == "name":
+            from config_manager import load_config
+            config = load_config()
+            if not config.get("mask_name", True):
+                continue
             # 성명 우측의 첫 번째 텍스트 단어 탐색 (성명 필수 별표* 기호는 필터링)
             max_name_gap = max(word['height'] * 15.0, 250)
             name_found = False  # 이름 마스킹 완료 여부
