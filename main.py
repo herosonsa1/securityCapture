@@ -485,6 +485,37 @@ class PrivacyMaskerApp:
         print("==========================================================")
 
 
+# 전역 변수로 뮤텍스 객체 참조를 유지하여 가비지 컬렉터에 의해 핸들이 닫히는 현상을 방지합니다.
+app_mutex = None
+
 if __name__ == "__main__":
+    import ctypes
+    from tkinter import messagebox
+    import tkinter as tk
+    
+    # 윈도우 전역 뮤텍스 상수 및 API 선언
+    ERROR_ALREADY_EXISTS = 183
+    mutex_name = "Global\\PrivacyMasker_SingleInstance_Mutex_829cf3"
+    
+    CreateMutex = ctypes.windll.kernel32.CreateMutexW
+    GetLastError = ctypes.windll.kernel32.GetLastError
+    
+    # 뮤텍스 생성 시도
+    app_mutex = CreateMutex(None, True, mutex_name)
+    last_error = GetLastError()
+    
+    if last_error == ERROR_ALREADY_EXISTS:
+        # 가짜 tk 루트 창을 임시 생성하여 경고 팝업이 활성화되도록 제어
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showwarning(
+            "중복 실행 방지",
+            "개인정보마스킹 프로그램이 이미 백그라운드에서 실행 중입니다.\n\n"
+            "화면 오른쪽 아래(작업 표시줄 트레이 아이콘 영역)에서 해당 아이콘을 확인해 주세요.",
+            parent=root
+        )
+        root.destroy()
+        sys.exit(0)
+        
     app = PrivacyMaskerApp()
     app.run()
