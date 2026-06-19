@@ -10,26 +10,25 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 # 입력 필드 UI의 대괄호 처리: [950101]-[1234567] / [950101] - [1234567] 형태도 지원
 # 뒷자리 성별코드: 1~4(내국인), 5~8(외국인)
 RRN_PATTERN = re.compile(
-    r'(?<![.\d])\[?(\d{6}|\d{8})\]?\s*-\s*\[?[1-8]\d{6}\]?(?!\d)'
+    r'\b(?:\d{2}|\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?([1-8])\d{6}\b'
 )
 
-# 전화번호 (01x-xxxx-xxxx 및 대시 없는 형태)
-# 대괄호로 감싸진 형태([010], [3559] 등 입력 필드 UI OCR 오인식 대응) 포함
-# \b 경계조건이 대괄호 [에 의해 오동작하지 않도록 보완
+# 전화번호 (01x-xxxx-xxxx 및 대시 없는 형태, 유선번호 포함)
+# 휴대전화번호: \b01[016789][-]?\d{3,4}[-]?\d{4}\b
+# 유선전화번호: \b0[2-6]\d?-\d{3,4}-\d{4}\b
 PHONE_PATTERN = re.compile(
-    r'\[?01[0-9]\]?[-\s]?\[?\d{3,4}\]?[-\s]?\[?\d{4}\]?'
-    r'|\b01[0-9]\d{7,8}\b'
+    r'\b01[016789][-]?\d{3,4}[-]?\d{4}\b'
     r'|\b0[2-6]\d?-\d{3,4}-\d{4}\b'
 )
 
 # 이메일 주소
 EMAIL_PATTERN = re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
 
-# 신용카드 번호
-CARD_PATTERN = re.compile(r'\b\d{4}-\d{4}-\d{4}-\d{4}\b|\b\d{16}\b')
+# 신용카드 번호 (공백/하이픈 옵셔널)
+CARD_PATTERN = re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b')
 
-# 계좌번호 (은행 계좌번호 포맷: 3~6자리 - 2~6자리 - 3~6자리)
-BANK_PATTERN = re.compile(r'\b\d{3,6}-\d{2,6}-\d{3,6}\b')
+# 계좌번호 (은행 계좌번호 포맷: 3~6자리 - 2~6자리 - 4~9자리, 하이픈 생략 가능)
+BANK_PATTERN = re.compile(r'\b\d{3,6}[-]?\d{2,6}[-]?\d{4,9}\b')
 
 # 생년월일 (구분자 필수, 달/일 범위를 명시적으로 한정하여 버전번호(3.5.2)·IP 오탐 방지)
 # 4자리 연도: 1900~2099, 2자리 연도: 00~99, 달: 01~12, 일: 01~31 범위 강제
@@ -48,27 +47,24 @@ BIRTH_PATTERN = re.compile(
 PASSPORT_PATTERN = re.compile(r'\b[A-Z]\d{8}\b|\b[A-Z]{2}\d{7}\b|\b[A-Z]\d{7}[A-Z]\b')
 
 # 운전면허번호
-# 실제 포맷: 숫자2자리 - 숫자6자리 - 숫자2자리 (지역코드2 + 일련번호6 + 검증번호2 = 총 10자리)
-# 예: 92-692533-74  /  13-123456-74
-# 분리 입력 필드 예: [92] [-] [123456] [-] [74]  → 각각 2자리·6자리·2자리 입력
-# 대시 포함 단일 OCR: 92-123456-74  (총 12자리 표현)
-# 대시 없는 연속 10자리: 9212345674  (분리 필드 합산 또는 OCR 연결)
 DRIVER_PATTERN = re.compile(
-    r'\b\d{2}-\d{6}-\d{2}\b'              # 대시 포함: XX-XXXXXX-XX (총 12자 표현, 숫자 10자리)
+    r'\b\d{2}-\d{6}-\d{2}\b'              # 대시 포함: XX-XXXXXX-XX
     r'|(?<![.\d/])\d{10}(?![.\d/])'       # 대시 없이 10자리 연속 숫자
 )
 
 # 차량번호 (자동차등록번호)
 # - 신형(2019+): 12가1234 / 123가1234  (숫자2~3 + 한글1 + 숫자4)
 # - 구형: 서울12가1234 / 서울 12 가 1234  (지역명 + 숫자2 + 한글1 + 숫자4)
-# 허용 한글(차량용 문자): 가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주하허호
-_VEH_CH = r'[가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주하허호]'
+# 허용 한글: 누락 방지를 위해 [가-힣] 전체 한글로 매칭 확장
 VEHICLE_PATTERN = re.compile(
-    rf'(?<!\d)'                       # 앞에 숫자 없음
-    rf'(?:[가-힣]{{2,3}}\s*)?'        # 선택적 지역명 (서울, 경기 등)
-    rf'\d{{2,3}}\s*{_VEH_CH}\s*\d{{4}}'  # 숫자2~3 + 차량한글 + 숫자4
-    rf'(?!\d)'                        # 뒤에 숫자 없음
+    r'(?<!\d)'                       # 앞에 숫자 없음
+    r'(?:[가-힣]{2,3}\s*)?'        # 선택적 지역명 (서울, 경기 등)
+    r'\d{2,3}\s*[가-힣]\s*\d{4}'      # 숫자2~3 + 차량한글 + 숫자4
+    r'(?!\d)'                        # 뒤에 숫자 없음
 )
+
+# 질병분류기호 (의료 보상 심사용, 예: J01, A09.0)
+DISEASE_PATTERN = re.compile(r'\b[A-Z]\d{2}(\.\d{1,2})?\b')
 
 # IP 주소 패턴 (IPv4)
 IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
@@ -659,6 +655,15 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                     'height': height
                 })
 
+    # 13. 질병분류기호 (예: J01 / A09.0 → 전체 마스킹)
+    elif DISEASE_PATTERN.search(norm_text):
+        sub_masks.append({
+            'x': x,
+            'y': y,
+            'width': width,
+            'height': height
+        })
+
     # 대괄호 '[', ']' 처리 보정: 대괄호 경계 근처의 마스킹 영역은 대괄호를 덮어쓰도록 확장
     if sub_masks:
         for mask in sub_masks:
@@ -701,6 +706,7 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
     CARD_LABELS = {"신용카드", "카드번호", "카드"}
     BANK_LABELS = {"계좌번호", "계좌"}
     IP_LABELS = {"IP주소", "IP", "아이피"}
+    DISEASE_LABELS = {"질병분류기호", "질병기호", "질병코드", "진단코드", "상병코드", "상병기호", "상병분류기호"}
     # 차량번호 레이블
     VEHICLE_LABELS = {
         "차량번호", "자동차번호", "차 번호", "차량 번호", "자동차 번호",
@@ -806,6 +812,7 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
         ("생년월일", "birth"), ("출생년월일", "birth"),
         ("여권번호", "passport"), ("운전면허번호", "driver"),
         ("이메일주소", "email"),
+        ("질병분류기호", "disease"), ("질병코드", "disease"), ("상병코드", "disease"),
         ("사고장소", "address"), ("사고지", "address"), ("장소", "address"),
     ]
 
@@ -915,6 +922,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             matched_label_type = "ip"
         elif any(lbl in text_stripped for lbl in VEHICLE_LABELS):
             matched_label_type = "vehicle"
+        elif any(lbl in text_stripped for lbl in DISEASE_LABELS):
+            matched_label_type = "disease"
 
         if not matched_label_type:
             continue
@@ -1346,8 +1355,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 for vw in driver_words:
                     used_indices.add(vw['_idx'])
 
-        elif matched_label_type in ["passport", "email", "card", "bank", "ip", "vehicle"]:
-            # 6종 개인정보 레이아웃 자동 탐지 및 부분 마스킹 처리
+        elif matched_label_type in ["passport", "email", "card", "bank", "ip", "vehicle", "disease"]:
+            # 7종 개인정보 레이아웃 자동 탐지 및 부분 마스킹 처리
             val_words = []
             max_gap = max(word['height'] * 20.0, 350)
             
@@ -1357,7 +1366,8 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                 "card": CARD_PATTERN,
                 "bank": BANK_PATTERN,
                 "ip": IP_PATTERN,
-                "vehicle": VEHICLE_PATTERN
+                "vehicle": VEHICLE_PATTERN,
+                "disease": DISEASE_PATTERN
             }
             target_pattern = pattern_map.get(matched_label_type)
             
@@ -1439,7 +1449,7 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                             else:
                                 mask_regions.append(merged)
                 else:
-                    # bank 외 나머지 5종 (passport, email, card, ip, vehicle)
+                    # bank 외 나머지 6종 (passport, email, card, ip, vehicle, disease)
                     merged = merge_boxes(val_words)
                     if merged:
                         combined_text = " ".join(w['text'] for w in val_words)
@@ -1771,7 +1781,8 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
                     (BANK_PATTERN, "bank"), (BIRTH_PATTERN, "birth"),
                     (PASSPORT_PATTERN, "passport"), (DRIVER_PATTERN, "driver"),
                     (IP_PATTERN, "ip"), (ADDRESS_PATTERN, "address"),
-                    (VEHICLE_PATTERN, "vehicle"),  # 차량번호 정규식 기반 감지 추가
+                    (VEHICLE_PATTERN, "vehicle"),
+                    (DISEASE_PATTERN, "disease"),  # 질병분류기호 추가
                 ]:
                     if pattern.search(text_no_space) or pattern.search(text_with_space):
                         if p_type == "birth":

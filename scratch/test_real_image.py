@@ -192,7 +192,22 @@ def run_simulated_tests():
     ocr_res_11 = {"status": "success", "words": words_11}
     mask_11, label_11 = detect_personal_info(ocr_res_11)
     print("  * 감지된 마스킹 영역 수:", len(mask_11))
-    for m in mask_11:
+    # 시나리오 12: 질병분류기호 감지 및 마스킹 검증
+    # [진단코드] [J01] / [질병코드] [A09.0] / [질병분류기호] [Z99.99]
+    # 예상 결과: J01, A09.0, Z99.99가 모두 정상적으로 마스킹됨
+    print("\n[시나리오 12] 질병분류기호 감지 및 마스킹 검증")
+    words_12 = [
+        {"text": "진단코드", "x": 10, "y": 1100, "width": 50, "height": 20},
+        {"text": "J01", "x": 70, "y": 1100, "width": 30, "height": 20},
+        {"text": "질병코드", "x": 120, "y": 1100, "width": 50, "height": 20},
+        {"text": "A09.0", "x": 180, "y": 1100, "width": 45, "height": 20},
+        {"text": "질병분류기호", "x": 240, "y": 1100, "width": 70, "height": 20},
+        {"text": "Z99.99", "x": 320, "y": 1100, "width": 50, "height": 20}
+    ]
+    ocr_res_12 = {"status": "success", "words": words_12}
+    mask_12, label_12 = detect_personal_info(ocr_res_12)
+    print("  * 감지된 마스킹 영역 수:", len(mask_12))
+    for m in mask_12:
         print(f"    마스킹: x={m['x']}, y={m['y']}, w={m['width']}, h={m['height']}")
 
 if __name__ == "__main__":
