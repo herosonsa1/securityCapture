@@ -2,22 +2,31 @@ import json
 import os
 import re
 import subprocess
+import sys
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 # 1. 개인정보 탐지를 위한 정규표현식 정의
-# 주민등록번호/외국인등록번호 (예: 950101-1234567, 19790722-1234567, 대시 필수)
-# 앞자리는 반드시 6자리(YYMMDD) 또는 8자리(YYYYMMDD)로만 허용하여 오탐 최소화
-# 입력 필드 UI의 대괄호 처리: [950101]-[1234567] / [950101] - [1234567] 형태도 지원
-# 뒷자리 성별코드: 1~4(내국인), 5~8(외국인)
+# 주민등록번호/외국인등록번호
+# 앞자리: 반드시 YYMMDD 6자리 엄격 매칭 (YY=\d{2}, MM=01~12, DD=01~31)
+# 구분자: '-', '[ ]', '\s' 등 대괄호·공백 포함 입력 필드 형태 허용
+# 뒷자리 성별코드: 1~8 (1~4: 내국인, 5~8: 외국인)
+# 예: 950101-1234567 / [950101]-[1234567] / [950101] - [1234567]
 RRN_PATTERN = re.compile(
-    r'\b(?:\d{2}|\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?([1-8])\d{6}\b'
+    r'(?<!\d)'
+    r'(\d{2})'
+    r'(0[1-9]|1[0-2])'
+    r'(0[1-9]|[12]\d|3[01])'
+    r'[\s\[\]]*[-]?[\s\[\]]*'
+    r'([1-8])\d{6}'
+    r'(?!\d)'
 )
 
 # 전화번호 (01x-xxxx-xxxx 및 대시 없는 형태, 유선번호 포함)
 # 휴대전화번호: \b01[016789][-]?\d{3,4}[-]?\d{4}\b
 # 유선전화번호: \b0[2-6]\d?-\d{3,4}-\d{4}\b
+# 대괄호 포함 입력 필드 형태도 인식 (\[010\]-\[xxxx\]-\[xxxx\])
 PHONE_PATTERN = re.compile(
-    r'\b01[016789][-]?\d{3,4}[-]?\d{4}\b'
+    r'\b01[016789][\[\]\s]*[-]?[\[\]\s]*\d{3,4}[\[\]\s]*[-]?[\[\]\s]*\d{4}\b'
     r'|\b0[2-6]\d?-\d{3,4}-\d{4}\b'
 )
 
@@ -25,10 +34,16 @@ PHONE_PATTERN = re.compile(
 EMAIL_PATTERN = re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
 
 # 신용카드 번호 (공백/하이픈 옵셔널)
+# 16자리 숫자 조합, 하이픈/공백으로 4자리씩 구분
 CARD_PATTERN = re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b')
 
-# 계좌번호 (은행 계좌번호 포맷: 3~6자리 - 2~6자리 - 4~9자리, 하이픈 생략 가능)
-BANK_PATTERN = re.compile(r'\b\d{3,6}[-]?\d{2,6}[-]?\d{4,9}\b')
+# 계좌번호 (은행 계좌번호 포맷: 하이픈으로 구분된 형태만 단독 탐지)
+# 하이픈 필수 버전: 단독 패턴 매칭 시 오탐 방지를 위해 반드시 '-' 포함 요구
+# 예: 110-123-456789 / 20-1234-5678901
+BANK_PATTERN = re.compile(r'\b\d{2,6}-\d{2,6}-\d{4,9}\b')
+# 컨텍스트(레이블) 기반 탐지 전용: 하이픈 없는 연속 숫자 계좌번호 탐지
+# 레이아웃 기반 탐지(detect_layout_based_info_and_indices)에서만 사용
+BANK_PATTERN_NO_DASH = re.compile(r'(?<!\d)\d{10,16}(?!\d)')
 
 # 생년월일 (구분자 필수, 달/일 범위를 명시적으로 한정하여 버전번호(3.5.2)·IP 오탐 방지)
 # 4자리 연도: 1900~2099, 2자리 연도: 00~99, 달: 01~12, 일: 01~31 범위 강제
@@ -55,16 +70,26 @@ DRIVER_PATTERN = re.compile(
 # 차량번호 (자동차등록번호)
 # - 신형(2019+): 12가1234 / 123가1234  (숫자2~3 + 한글1 + 숫자4)
 # - 구형: 서울12가1234 / 서울 12 가 1234  (지역명 + 숫자2 + 한글1 + 숫자4)
-# 허용 한글: 누락 방지를 위해 [가-힣] 전체 한글로 매칭 확장
+# 허용 한글: 실제 자동차 번호판에 사용되는 한글(가나다라...하허호) 33자로 엄격히 제한
+# → [가-힣] 전체 허용 시 일반 한글 단어(이름, 지명 등)와 혼동되어 오탐 발생
+VEHICLE_HANGUL = '가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주하허호'
+VEHICLE_HANGUL_SET = set(VEHICLE_HANGUL)
 VEHICLE_PATTERN = re.compile(
-    r'(?<!\d)'                       # 앞에 숫자 없음
-    r'(?:[가-힣]{2,3}\s*)?'        # 선택적 지역명 (서울, 경기 등)
-    r'\d{2,3}\s*[가-힣]\s*\d{4}'      # 숫자2~3 + 차량한글 + 숫자4
-    r'(?!\d)'                        # 뒤에 숫자 없음
+    r'(?<!\d)'                                          # 앞에 숫자 없음
+    r'(?:[가-힣]{2,3}\s*)?'                           # 선택적 지역명 (서울, 경기 등)
+    rf'\d{{2,3}}\s*[{VEHICLE_HANGUL}]\s*\d{{4}}'     # 숫자2~3 + 차량용 한글 + 숫자4
+    r'(?!\d)'                                          # 뒤에 숫자 없음
 )
 
 # 질병분류기호 (의료 보상 심사용, 예: J01, A09.0)
+# ICD-10 분류: 영문대문자 1자 + 숫자 2자 + 선택적 소수점+숫자
+# 오탐 방지: 단독 패턴 매칭 시 U(코로나 계열) 제외하면 오류코드·제품코드와 혼동 가능
+# → 레이아웃 컨텍스트(질병코드 레이블 우측) 없이는 단독 탐지 제한 적용
+# → detect_personal_info에서 레이블 없는 단독 탐지 시 DISEASE_STANDALONE_ENABLED=False 체크
 DISEASE_PATTERN = re.compile(r'\b[A-Z]\d{2}(\.\d{1,2})?\b')
+# 레이아웃 컨텍스트(레이블)가 없을 때의 단독 탐지 허용 여부
+# False: 레이블 없는 단독 DISEASE 탐지 비활성화 (오탐 방지)
+DISEASE_STANDALONE_ENABLED = False
 
 # IP 주소 패턴 (IPv4)
 IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
@@ -72,8 +97,26 @@ IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
 # 시간 패턴 (HH:MM 또는 오전/오후 HH:MM 또는 HH시)
 TIME_PATTERN = re.compile(r'\d{1,2}:\d{2}|오전|오후|\b\d{1,2}시\b')
 
-# 주소 패턴 (시/도 및 구/동/읍/면/로/길 행정구역 특징 매칭)
-ADDRESS_PATTERN = re.compile(r'\b[가-힣]{2,4}[시도]\b.*\b[가-힣]+[구동읍면로길]\b')
+# 주소 패턴 – 1단계: 시/도로 시작하는 행정구역 + 건물 번호까지 캡처 (기본 주소 커트라인)
+# 그룹1: 기본주소(시/도 ~ 로/길/동 + 건물번호), 그룹2: 상세주소(나머지)
+# 오탐 방지: 반드시 시/도로 시작하고 행정구역 키워드(로|길|동|읍|면|번지)가 있어야 매칭
+ADDRESS_PATTERN = re.compile(
+    r'\b[가-힣]{2,4}(?:시|도)'           # 시/도로 시작 (서울특별시, 경기도 등)
+    r'[^\d]*'                              # 시/도 이후 비숫자 구간 (구/군/읍/면/동/로/길)
+    r'(?:로|길|동|읍|면|번지)\s*'         # 도로명 또는 지번 행정구역 키워드
+    r'\d+(?:-\d+)?'                        # 건물 본번(-부번) 숫자
+)
+# 동/호/층/B층 상세주소 패턴 – 아파트 동호수·층수 탐지
+# 동/호/층/B층 상세주소 패턴 – 아파트 동호수·층수 탐지
+# 식별자에 반드시 숫자 또는 영문자가 포함되어야 매칭 (순수 한글 식별자는 법정동으로 간주)
+# 예: 101동 ✓, A동 ✓, B1층 ✓, 지하1층 ✓ / 목동 ✗, 천호동 ✗, 서초동 ✗
+UNIT_DETAIL_PATTERN = re.compile(
+    r'(?<![가-힣])'                           # 앞이 한글(법정동 접미)이면 제외
+    r'([가-힣]{0,3}[0-9a-zA-Z][0-9a-zA-Z가-힣]{0,4})'  # 식별자: 반드시 숫자/영문 포함 (한글 prefix 허용)
+    r'\s*'
+    r'(동|호|층|[Bb]\d{0,2}층?)'              # 단위 키워드
+    r'(?!\s*[가-힣]{2,})'                     # 뒤에 긴 한글(지명)이 오면 제외
+)
 
 # 한글 이름 성씨 패턴 (한국인 인구 대다수를 차지하는 주요 성씨 33종)
 # 일반 명사의 접두사로 오남용되는 희귀 성씨들을 걷어내어 오탐지를 최소화합니다.
@@ -96,6 +139,8 @@ EXCLUDE_NOUNS = {
     "과장", "부장", "차장", "주임", "본부", "팀장", "센터", "관리", "본부장", "센터장", 
     "일반", "개발", "지원", "보상", "기획", "재물", "팀원", "플랫폼", "직원", "담당", 
     "전사", "지점", "실장", "소장", "원장", "처장", "국장", "부서명", "직책", "직무",
+    # 후행 앵커 오탐 방지용 직함/역할명 추가 (예: 관리자님, 담당자씨 오탐 차단)
+    "관리자", "담당자", "사용자명", "고객사", "거래처", "대리점", "계열사",
     
     # IT 및 시스템 메뉴 명사
     "사용자", "그룹", "그룹관리", "사용자관리", "사용자목록", "목록", "상세", "조회", "수정", 
@@ -112,6 +157,121 @@ EXCLUDE_NOUNS = {
     "대상", "조건", "필터", "정렬", "기본", "선택", "전체", "상세정보", "정보", "개인"
 }
 
+# ── 외부 화이트리스트(name_whitelist.json) 로딩 및 EXCLUDE_NOUNS 자동 병합 ──────
+# name_whitelist.json에 손해사정 업무 특유의 오탐 대상 용어를 카테고리별로 관리합니다.
+# 이 파일을 수정하면 재기동 없이 다음 모듈 로드 시 자동 반영됩니다.
+# 파일이 없거나 파싱 오류 시 기존 하드코딩 EXCLUDE_NOUNS만으로 동작합니다.
+
+def _load_name_whitelist(whitelist_path: str = None) -> set:
+    """
+    name_whitelist.json을 읽어 모든 카테고리의 용어를 단일 집합으로 반환합니다.
+
+    JSON 구조:
+        {
+            "카테고리명": {
+                "_desc": "설명 (무시)",
+                "하위카테고리": ["용어1", "용어2", ...]
+            },
+            ...
+        }
+
+    Args:
+        whitelist_path: JSON 파일 경로. None이면 masking_core.py와 동일 디렉토리의
+                        name_whitelist.json을 사용합니다.
+
+    Returns:
+        용어 문자열 집합 (str set). 로딩 실패 시 빈 집합 반환.
+    """
+    if whitelist_path is None:
+        if getattr(sys, 'frozen', False):
+            # ── PyInstaller 단일 EXE 빌드 환경 ──────────────────────────────
+            # 탐색 순서:
+            #   1순위: EXE 옆 사용자 정의 파일 (배포 후 직접 편집 가능한 오버라이드)
+            #   2순위: sys._MEIPASS (EXE 내부 번들 파일, --add-data로 포함됨)
+            exe_dir = os.path.dirname(sys.executable)
+            user_override = os.path.join(exe_dir, "name_whitelist.json")
+            bundle_path   = os.path.join(getattr(sys, '_MEIPASS', exe_dir), "name_whitelist.json")
+
+            if os.path.exists(user_override):
+                whitelist_path = user_override   # 사용자 오버라이드 우선
+            else:
+                whitelist_path = bundle_path     # EXE 내부 번들 사용
+        else:
+            # 개발 환경: masking_core.py 소스 파일 기준 디렉토리
+            whitelist_path = os.path.join(os.path.dirname(__file__), "name_whitelist.json")
+
+    result = set()
+    if not os.path.exists(whitelist_path):
+        return result
+
+    try:
+        with open(whitelist_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        for cat_key, cat_val in data.items():
+            # 최상위 키 중 '_'로 시작하는 메타 필드는 건너뜀
+            if cat_key.startswith("_"):
+                continue
+            if not isinstance(cat_val, dict):
+                continue
+            for sub_key, sub_val in cat_val.items():
+                # 하위 키 중 '_'로 시작하는 설명 필드는 건너뜀
+                if sub_key.startswith("_"):
+                    continue
+                if isinstance(sub_val, list):
+                    for term in sub_val:
+                        if isinstance(term, str) and term.strip():
+                            result.add(term.strip())
+
+        print(f"[화이트리스트] {whitelist_path} 로드 완료: {len(result)}개 용어")
+    except Exception as e:
+        print(f"[화이트리스트] 로드 실패({whitelist_path}): {e}")
+
+    return result
+
+
+# 모듈 로드 시 화이트리스트를 EXCLUDE_NOUNS에 병합
+_whitelist_terms = _load_name_whitelist()
+if _whitelist_terms:
+    EXCLUDE_NOUNS = EXCLUDE_NOUNS | _whitelist_terms
+
+# ── 이름 앵커 키워드 기반 탐지용 패턴 ────────────────────────────────────────
+# 손해사정·보험 업무 문서에서 이름 앞뒤에 나타나는 식별 키워드(앵커)를 기준으로
+# 주변 2~4글자 한글을 이름으로 간주하여 마스킹합니다.
+
+# 선행 앵커: 이름 앞에 오는 업무 키워드 (|로 구분된 정규식 대안)
+# 긴 키워드 → 짧은 키워드 순으로 배치하여 부분 매칭 우선 방지
+_NAME_LEADING_ANCHORS = (
+    "피보험자명|담보제공자|피청구인|피보험자|피의자|환자명|환자|청구인"
+    "|사망자|부상자|상해자|의뢰인|신청인|수익자|보호자|대리인|위임자"
+    "|가입자|계약자|보험자|대표자|운전자|예금주|고객명|고객"
+    "|성명|이름"
+)
+# 후행 앵커: 이름 뒤에 오는 호칭 키워드 (긴 순서 우선)
+_NAME_TRAILING_ANCHORS = "선생님|귀하|님|씨"
+
+# 단일 OCR 단어 내 선행 앵커 + 이름 탐지 패턴
+# 예: "성명:홍길동", "피보험자김철수"
+NAME_ANCHOR_LEADING_PATTERN = re.compile(
+    rf'(?:{_NAME_LEADING_ANCHORS})'     # 선행 앵커
+    r'[\s\:\uff1a\·\-]*'               # 구분자 (공백/콜론/전각콜론/점/하이픈)
+    r'([가-힣]{2,4})'                  # 이름 (캡처)
+)
+# 단일 OCR 단어 내 후행 앵커 탐지 패턴
+# 예: "홍길동님", "김철수씨"
+NAME_ANCHOR_TRAILING_PATTERN = re.compile(
+    r'([가-힣]{2,4})'                  # 이름 (캡처)
+    r'\s*'
+    rf'(?:{_NAME_TRAILING_ANCHORS})'   # 후행 앵커
+)
+# 선행 앵커 단어(단독 토큰) 판별용 패턴 – 인접 단어가 이름인지 확인할 때 사용
+NAME_LEADING_ANCHOR_WORD_PATTERN = re.compile(
+    rf'^(?:{_NAME_LEADING_ANCHORS})[\s\:\uff1a\·\-]*$'
+)
+# 후행 앵커 단어(단독 토큰) 판별용 패턴
+NAME_TRAILING_ANCHOR_WORD_PATTERN = re.compile(
+    rf'^[\s]*(?:{_NAME_TRAILING_ANCHORS})[\s]*$'
+)
 
 def is_likely_korean_name(text):
     """
@@ -119,6 +279,19 @@ def is_likely_korean_name(text):
     """
     if not text:
         return False
+
+    # ── 공백 분리 복합 단어 차단 ─────────────────────────────────────────────
+    # "2글자 2글자" / "2글자 3글자" / "3글자 3글자" 등 공백으로 이어진 두 단어 조합은
+    # 이름이 아닌 업무 문구(예: "보험 가입", "처리 완료")로 판단합니다.
+    # 슬라이딩 윈도우가 여러 단어를 결합해 넘기는 경우를 차단합니다.
+    stripped = text.strip()
+    if ' ' in stripped or '\t' in stripped:
+        # 공백으로 분리된 토큰 각각의 순수 한글 길이 계산
+        tokens = stripped.split()
+        hangul_lens = [len(re.sub(r'[^가-힣]', '', t)) for t in tokens]
+        # 2개 토큰이고 각각 2~4글자 한글인 경우 → 이름이 아닌 복합어로 판단
+        if len(hangul_lens) >= 2 and all(2 <= l <= 4 for l in hangul_lens):
+            return False
         
     # 불필요한 공백이나 가이드라인 기호(테두리 등)를 제거하고 순수 한글만 추출
     clean_text = re.sub(r'[^가-힣]', '', text)
@@ -224,6 +397,202 @@ def verify_rrn_checksum(digits_only):
         
     # 날짜 검증을 통과하고 성별 대역이 유효하다면 보수적으로 안전하게 마스킹 처리 (누락 방지)
     return True
+
+
+def detect_name_by_anchor(words, used_word_indices=None, name_mask_style="middle"):
+    """
+    OCR 단어 목록에서 앵커 키워드 기반으로 이름을 탐지하여 마스킹 영역을 반환합니다.
+
+    두 가지 경로로 이름을 탐지합니다:
+    1) 단일 단어 내 앵커+이름 조합
+       - "성명:홍길동"처럼 앵커와 이름이 한 OCR 단어로 인식된 경우
+       - "홍길동님"처럼 후행 앵커와 이름이 한 단어로 인식된 경우
+    2) 인접 단어 간 앵커→이름 또는 이름→앵커 관계
+       - "성명" 단어 우측에 바로 "홍길동" 단어가 있는 경우 (선행 앵커)
+       - "홍길동" 단어 우측에 바로 "님" 단어가 있는 경우 (후행 앵커)
+
+    Args:
+        words: OCR 단어 목록 (각 요소는 {'text', 'x', 'y', 'width', 'height', '_idx'} 구조)
+        used_word_indices: 이미 처리된 단어 인덱스 집합 (중복 방지)
+        name_mask_style: 이름 마스킹 스타일 (calculate_sub_masks 참조)
+
+    Returns:
+        (mask_regions, new_used_indices):
+            mask_regions: 새로 탐지된 마스킹 영역 목록
+            new_used_indices: 이번 탐지에서 사용된 단어 인덱스 집합
+    """
+    if used_word_indices is None:
+        used_word_indices = set()
+
+    mask_regions = []
+    new_used_indices = set()
+
+    if not words:
+        return mask_regions, new_used_indices
+
+    # 단어를 행(Row)별로 그룹화 (Y 기준)
+    sorted_words = sorted(words, key=lambda w: (w['y'], w['x']))
+    row_groups = []
+    cur_row = [sorted_words[0]]
+    for wi in sorted_words[1:]:
+        if abs(wi['y'] - cur_row[0]['y']) <= max(cur_row[0]['height'] * 0.8, 8):
+            cur_row.append(wi)
+        else:
+            row_groups.append(cur_row)
+            cur_row = [wi]
+    row_groups.append(cur_row)
+
+    # ── 각 행 내에서 앵커 탐지 ──────────────────────────────────────────────
+    for row in row_groups:
+        row.sort(key=lambda w: w['x'])
+        n = len(row)
+
+        for i, word in enumerate(row):
+            # 이미 처리된 단어는 앵커로도, 이름으로도 사용하지 않음
+            widx = word.get('_idx', id(word))
+
+            # ── 경로 1: 단일 단어 내 앵커+이름 조합 탐지 ───────────────────
+            word_text_clean = re.sub(r'[\[\]\s]', '', word['text'])
+
+            # 1-A: 선행 앵커 + 이름 (예: "성명:홍길동", "피보험자김철수")
+            m_leading = NAME_ANCHOR_LEADING_PATTERN.search(word_text_clean)
+            if m_leading and widx not in used_word_indices and widx not in new_used_indices:
+                name_str = m_leading.group(1)
+                # 이름 검증: EXCLUDE_NOUNS 아니고 is_likely_korean_name 통과해야 마스킹
+                if (name_str not in EXCLUDE_NOUNS
+                        and is_likely_korean_name(name_str)):
+                    # 이름 텍스트가 단어 내 어느 위치에 있는지 확인하여 마스킹 좌표 계산
+                    name_start_idx = word_text_clean.index(name_str, m_leading.start(1))
+                    total_chars = len(word_text_clean)
+                    char_w = word['width'] / max(1, total_chars)
+                    mask_x = int(word['x'] + name_start_idx * char_w)
+                    mask_w = int(len(name_str) * char_w)
+                    if mask_w > 0:
+                        mask_regions.append({
+                            'x': mask_x, 'y': word['y'],
+                            'width': mask_w, 'height': word['height']
+                        })
+                    new_used_indices.add(widx)
+                    print(f"[앵커이름-선행단일] {word_text_clean!r} -> {name_str!r} 마스킹")
+                    continue  # 이 단어는 처리 완료
+
+            # 1-B: 이름 + 후행 앵커 (예: "홍길동님", "김철수씨")
+            m_trailing = NAME_ANCHOR_TRAILING_PATTERN.search(word_text_clean)
+            if m_trailing and widx not in used_word_indices and widx not in new_used_indices:
+                name_str = m_trailing.group(1)
+                if (name_str not in EXCLUDE_NOUNS
+                        and is_likely_korean_name(name_str)):
+                    name_start_idx = word_text_clean.index(name_str, m_trailing.start(1))
+                    total_chars = len(word_text_clean)
+                    char_w = word['width'] / max(1, total_chars)
+                    mask_x = int(word['x'] + name_start_idx * char_w)
+                    mask_w = int(len(name_str) * char_w)
+                    if mask_w > 0:
+                        mask_regions.append({
+                            'x': mask_x, 'y': word['y'],
+                            'width': mask_w, 'height': word['height']
+                        })
+                    new_used_indices.add(widx)
+                    print(f"[앵커이름-후행단일] {word_text_clean!r} → {name_str!r} 마스킹")
+                    continue
+
+            # ── 경로 2: 인접 단어 간 앵커→이름 관계 ────────────────────────
+            # 2-A: 현재 단어가 선행 앵커 단어이면 → 우측 인접 단어에서 이름 탐지
+            # NAME_LEADING_ANCHOR_WORD_PATTERN으로 앵커 단독 여부만 판별
+            # (피보험자와, 피보험자가 등 조사 붙은 단어는 선행 앵커로 취급하지 않음)
+            word_text_norm = re.sub(r'[\s\:\uff1a\·\-]+$', '', word_text_clean)
+            if NAME_LEADING_ANCHOR_WORD_PATTERN.match(word_text_clean):
+                # 우측 인접 단어 탐색 (최대 2개 건너뜀 허용: 콜론/구분자 토큰)
+                j = i + 1
+                skipped = 0
+                while j < n and skipped <= 2:
+                    next_word = row[j]
+                    nwidx = next_word.get('_idx', id(next_word))
+                    # 간격 확인: 너무 멀면 다른 필드
+                    gap = next_word['x'] - (word['x'] + word['width'])
+                    if gap > max(word['height'] * 20.0, 300):
+                        break
+                    next_clean = re.sub(r'[\[\]\s\:\uff1a\·\-]', '', next_word['text'])
+                    hangul_only = re.sub(r'[^가-힣]', '', next_clean)
+                    # 구분자 단어 건너뜀 (콜론 등)
+                    if not hangul_only and not re.search(r'[가-힣a-zA-Z]', next_clean):
+                        j += 1
+                        skipped += 1
+                        continue
+                    # 이름 후보: 2~4글자 한글이고 EXCLUDE_NOUNS 아님
+                    if (2 <= len(hangul_only) <= 4
+                            and len(next_clean) == len(hangul_only)
+                            and hangul_only not in EXCLUDE_NOUNS
+                            and nwidx not in used_word_indices
+                            and nwidx not in new_used_indices):
+                        # 이름 검증: is_likely_korean_name 항상 필수
+                        # strong_anchor이더라도 최소한 2~4글자 한글 + 성씨 + 금지 음절 없음 조건은 충족해야 함
+                        anchor_clean = word_text_clean
+                        strong_anchor = any(
+                            kw in anchor_clean
+                            for kw in ['피보험자', '피해자', '청구인', '예금주', '피의자',
+                                       '환자', '사망자', '신청인', '수익자', '의뢰인']
+                        )
+                        # strong_anchor의 경우 2글자 이름의 COMMON_NAME_SYLLABLES 조건을 완화
+                        # 하지만 성씨 + 금지 음절 없음 기본 조건은 유지
+                        name_valid = is_likely_korean_name(hangul_only)
+                        if not name_valid and strong_anchor and len(hangul_only) >= 3:
+                            # 3글자 이상 + 강력 앵커: 성씨+금지음절 조건만 충족하면 허용
+                            # (COMMON_NAME_SYLLABLES 2글자 제한 완화 목적)
+                            clean_n = re.sub(r'[^가-힣]', '', hangul_only)
+                            if (2 <= len(clean_n) <= 4
+                                    and clean_n[0] in SURNAMES
+                                    and not any(c in FORBIDDEN_NAME_SYLLABLES for c in clean_n[1:])):
+                                name_valid = True
+                        if name_valid:
+                            sub_masks = calculate_sub_masks(
+                                next_word['text'], next_word['x'], next_word['y'],
+                                next_word['width'], next_word['height'], name_mask_style
+                            )
+                            if sub_masks:
+                                mask_regions.extend(sub_masks)
+                            else:
+                                mask_regions.append({
+                                    'x': next_word['x'], 'y': next_word['y'],
+                                    'width': next_word['width'], 'height': next_word['height']
+                                })
+                            new_used_indices.add(nwidx)
+                            print(f"[앵커이름-선행인접] {word_text_clean!r} -> {hangul_only!r} 마스킹")
+                    break  # 한글 단어를 만나면 이름 탐색 완료 (찾든 못 찾든)
+
+            # 2-B: 우측 인접 단어가 후행 앵커이면 → 현재 단어가 이름인지 확인
+            if i + 1 < n:
+                next_word = row[i + 1]
+                nwidx = next_word.get('_idx', id(next_word))
+                next_text_clean = re.sub(r'[\[\]\s]', '', next_word['text'])
+                # 인접 간격 확인
+                gap_to_next = next_word['x'] - (word['x'] + word['width'])
+                if (gap_to_next <= max(word['height'] * 15.0, 200)
+                        and NAME_TRAILING_ANCHOR_WORD_PATTERN.match(next_text_clean)):
+                    # 현재 단어가 이름 후보인지 확인
+                    cur_clean = re.sub(r'[\[\]\s]', '', word['text'])
+                    hangul_only_cur = re.sub(r'[^가-힣]', '', cur_clean)
+                    if (2 <= len(hangul_only_cur) <= 4
+                            and len(cur_clean) == len(hangul_only_cur)
+                            and hangul_only_cur not in EXCLUDE_NOUNS
+                            and widx not in used_word_indices
+                            and widx not in new_used_indices
+                            and is_likely_korean_name(hangul_only_cur)):  # 후행 앵커는 is_likely_korean_name 필수 검증
+                        sub_masks = calculate_sub_masks(
+                            word['text'], word['x'], word['y'],
+                            word['width'], word['height'], name_mask_style
+                        )
+                        if sub_masks:
+                            mask_regions.extend(sub_masks)
+                        else:
+                            mask_regions.append({
+                                'x': word['x'], 'y': word['y'],
+                                'width': word['width'], 'height': word['height']
+                            })
+                        new_used_indices.add(widx)
+                        print(f"[앵커이름-후행인접] {next_text_clean!r} <- {hangul_only_cur!r} 마스킹")
+
+    return mask_regions, new_used_indices
 
 
 def run_ocr(image_path):
@@ -463,11 +832,20 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
     '[950101]-[1234567]', '[02-020589-74]' 등 대괄호 포함 OCR 결과에서도 정확히 마스킹합니다.
     """
     sub_masks = []
-    # ── 대괄호 제거 정규화 ─────────────────────────────────────────────────────
+    # ── 대괄호/공백 제거 정규화 ────────────────────────────────────────────────
     # 입력 필드 UI의 [ ] 처리: '[950101]-[1234567]' → '950101-1234567'
     # 패턴 탐지·문자 위치 계산은 norm_text 기준으로 수행하여 오프셋 오류를 방지합니다.
     norm_text = re.sub(r'[\[\]]', '', text)
+    # char_w: 전체 norm_text 길이 대비 픽셀 폭 비율
     char_w = width / max(1, len(norm_text))
+    # effective_char_w: 공백이 많은 분리 입력 필드 형태 대응
+    # 공백 제외 순수 문자 비율이 70% 미만이면 nospace 기준으로 더 큰 char_w 사용
+    norm_text_nospace = re.sub(r'\s', '', norm_text)
+    char_w_nospace = width / max(1, len(norm_text_nospace)) if norm_text_nospace else char_w
+    if norm_text_nospace and len(norm_text) > 0 and len(norm_text_nospace) / len(norm_text) < 0.7:
+        effective_char_w = char_w_nospace
+    else:
+        effective_char_w = char_w
     # ─────────────────────────────────────────────────────────────────────────
 
     # 1. 주민등록번호 / 외국인등록번호 (예: 950101-1*****)
@@ -480,21 +858,24 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
     if is_rrn:
         dash_idx = norm_text.find('-')
         if dash_idx != -1:
+            # 하이픈 포함 포맷 (예: 950101-1234567)
             # 앞 6자리(생년월일) + 대시 1자리 + 성별 1자리 = 8자리 노출, 이후 6자리 가림
-            w_back = 6 * char_w
-            sub_masks.append({
-                'x': int(x + 8 * char_w),
-                'y': y,
-                'width': int(w_back),
-                'height': height
-            })
+            # norm_text 기준으로 대시 위치 계산 (공백 포함 가능
+            expose_end = dash_idx + 2  # 대시 + 성별 1자리 포함 노출
+            w_back = width - int(expose_end * char_w)
+            if w_back > 0:
+                sub_masks.append({
+                    'x': int(x + expose_end * char_w),
+                    'y': y,
+                    'width': w_back,
+                    'height': height
+                })
         else:
-            # 앞 6자리(생년월일) + 성별 1자리 = 7자리 노출, 이후 6자리 가림
-            w_back = 6 * char_w
+            # 대시 미포함 포맷 (예: 0101234567890): 앞 7자리(생년월일+성별) 노출, 이후 6자리 가림
             sub_masks.append({
                 'x': int(x + 7 * char_w),
                 'y': y,
-                'width': int(w_back),
+                'width': int(6 * char_w),
                 'height': height
             })
 
@@ -510,13 +891,15 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
         })
 
     # 3. 전화번호 / 휴대전화번호 (예: 010-1234-5678 → 010-****-5678)
-    # 가운데 4자리(국번) 마스킹
+    # 가운데 국번(중간 수자) 마스킹
     elif PHONE_PATTERN.search(norm_text):
-        if '-' in norm_text:
+        # norm_text 에서 대시 위치 확인
+        phone_dash_idx = norm_text.find('-')
+        if phone_dash_idx != -1:
             # 대시 포함 포맷 (예: 010-1234-5678)
-            dash_idx = norm_text.find('-')
+            # 첫 번째 대시 다음 좌표부터 4자리 마스킹
             sub_masks.append({
-                'x': int(x + (dash_idx + 1) * char_w),
+                'x': int(x + (phone_dash_idx + 1) * char_w),
                 'y': y,
                 'width': int(4 * char_w),
                 'height': height
@@ -601,15 +984,23 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
             })
 
     # 9. 계좌번호 (예: 110-123-456789 → 110-123-*****)
+    # 하이픈 필수 버전의 BANK_PATTERN에 매칭된 경우에만 마스킹 (=하이픈이 있는 형태)
     elif BANK_PATTERN.search(norm_text):
-        w_mask = 6 * char_w
-        if len(norm_text) > 6:
-            sub_masks.append({
-                'x': int(x + (len(norm_text) - 6) * char_w),
-                'y': y,
-                'width': int(w_mask),
-                'height': height
-            })
+        # 마지막 '-' 배열 시작 위치부터 마스킹
+        last_dash = norm_text.rfind('-')
+        if last_dash != -1:
+            mask_start = last_dash + 1
+            mask_w = int((len(norm_text) - mask_start) * char_w)
+            if mask_w > 0:
+                sub_masks.append({
+                    'x': int(x + mask_start * char_w),
+                    'y': y,
+                    'width': mask_w,
+                    'height': height
+                })
+        else:
+            # 하이픈 없는 경우: BANK_PATTERN은 하이픈 필수이므로 이 코드는 실질적 도달 안 됨
+            pass
 
     # 10. IP 주소 (예: 192.168.1.1 → 192.168.*.**)
     elif IP_PATTERN.search(norm_text):
@@ -624,36 +1015,83 @@ def calculate_sub_masks(text, x, y, width, height, name_mask_style="middle"):
                 'height': height
             })
 
-    # 11. 주소 (예: 경기도 성남시 수정구 태평동 123 → 경기도 성남시 수정구 ****)
+    # 11. 주소 – 3단계 판별 마스킹
+    # [1단계] 기본 주소 커트라인(마지막 로/길/동/읍/면+건물번호) 탐색
+    # [2단계] 커트라인 이후를 상세주소 영역으로 격리
+    # [3단계] 격리 영역에서 동/호/층 패턴으로 선택적 마스킹(또는 전체 마스킹)
     elif ADDRESS_PATTERN.search(norm_text):
-        match = None
-        for kw in ["구", "동", "읍", "면", "로", "길", "시", "도"]:
-            idx = norm_text.rfind(kw)
-            if idx != -1:
-                match = idx + 1
-                break
-        if match and match < len(norm_text):
-            sub_masks.append({
-                'x': int(x + match * char_w),
-                'y': y,
-                'width': int((len(norm_text) - match) * char_w),
-                'height': height
-            })
+        # 1단계: 도로명/지번 커트라인 찾기
+        # 'XX로 NN', 'XX길 NN', 'XX동 NN', 'XX번지' 패턴에서 숫자(건물번호) 끝 위치를 커트라인으로 설정
+        cutline_idx = -1
+        # 마지막으로 등장하는 행정구역 키워드+숫자 조합 탐색
+        road_num_match = re.search(
+            r'(?:로|길|동|읍|면|번지)\s*(\d+(?:-\d+)?)(?!\d)',
+            norm_text
+        )
+        if road_num_match:
+            cutline_idx = road_num_match.end()  # 건물번호 끝 위치
+
+        if cutline_idx > 0 and cutline_idx < len(norm_text):
+            # 2단계: 커트라인 이후 = 상세주소 구간
+            detail_text = norm_text[cutline_idx:]
+
+            # 3단계: 상세주소 내 동/호/층 패턴으로 선택적 마스킹
+            unit_matches = list(UNIT_DETAIL_PATTERN.finditer(detail_text))
+            if unit_matches:
+                # 동/호/층 식별자(숫자 부분)만 마스킹
+                for um in unit_matches:
+                    id_group = um.group(1)  # '101', 'A', '지하1' 등 식별자
+                    match_start_in_detail = um.start(1)
+                    id_len = len(id_group)
+                    abs_start = cutline_idx + match_start_in_detail
+                    sub_masks.append({
+                        'x': int(x + abs_start * char_w),
+                        'y': y,
+                        'width': int(id_len * char_w),
+                        'height': height
+                    })
+            else:
+                # 동/호/층 패턴 없으면 상세주소 구간 전체 마스킹 (가장 안전)
+                detail_w = int((len(norm_text) - cutline_idx) * char_w)
+                if detail_w > 0:
+                    sub_masks.append({
+                        'x': int(x + cutline_idx * char_w),
+                        'y': y,
+                        'width': detail_w,
+                        'height': height
+                    })
+        else:
+            # 커트라인을 찾지 못한 경우: 마지막 행정구역 키워드 이후 전체 마스킹 (기존 방식 폴백)
+            for kw in ["구", "동", "읍", "면", "로", "길", "시", "도"]:
+                idx = norm_text.rfind(kw)
+                if idx != -1:
+                    if idx + 1 < len(norm_text):
+                        sub_masks.append({
+                            'x': int(x + (idx + 1) * char_w),
+                            'y': y,
+                            'width': int((len(norm_text) - idx - 1) * char_w),
+                            'height': height
+                        })
+                    break
 
     # 12. 차량번호 (예: 12가1234 → 12가****)
+    # 하해와 필해로 실제 차량용 한글인지 검증 후 마스킹
     elif VEHICLE_PATTERN.search(norm_text):
         m = VEHICLE_PATTERN.search(norm_text)
         if m:
             matched_str = m.group()
-            last4_match = re.search(r'\d{4}$', matched_str)
-            if last4_match:
-                offset_in_text = m.start() + last4_match.start()
-                sub_masks.append({
-                    'x': int(x + offset_in_text * char_w),
-                    'y': y,
-                    'width': int(4 * char_w),
-                    'height': height
-                })
+            # 실제 차량용 한글 포함여부 확인
+            hangul_in_match = [c for c in matched_str if c in VEHICLE_HANGUL_SET]
+            if hangul_in_match:  # 실제 차량용 한글이 있는 경우만 마스킹
+                last4_match = re.search(r'\d{4}$', matched_str)
+                if last4_match:
+                    offset_in_text = m.start() + last4_match.start()
+                    sub_masks.append({
+                        'x': int(x + offset_in_text * char_w),
+                        'y': y,
+                        'width': int(4 * char_w),
+                        'height': height
+                    })
 
     # 13. 질병분류기호 (예: J01 / A09.0 → 전체 마스킹)
     elif DISEASE_PATTERN.search(norm_text):
@@ -1423,15 +1861,20 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
             if val_words:
                 if matched_label_type == "bank":
                     # 계좌번호 분리 입력 필드 대응
-                    # 숫자 세그먼트 단어 추출
+                    # 숫자 세그먼트 단어 추출 (대괄호 제거)
                     numeric_segs = []
                     for vw in val_words:
                         digits_only = re.sub(r'\D', '', re.sub(r'[\[\]]', '', vw['text']))
                         if digits_only:
                             numeric_segs.append((vw, digits_only))
-                            
+
+                    total_digits = ''.join(d for _, d in numeric_segs)
+                    combined_text_bank = ''.join(w['text'] for w in val_words)
+                    combined_norm_bank = re.sub(r'[\[\]]', '', combined_text_bank)
+
                     if len(numeric_segs) >= 2:
                         # 분리 필드 형태: 마지막 숫자 필드 박스 전체를 마스킹
+                        # 레이블 컨텍스트가 있으므로 마지막 세그먼트 마스킹
                         for idx_seg, (vw, digits) in enumerate(numeric_segs):
                             if idx_seg == len(numeric_segs) - 1:
                                 mask_regions.append({
@@ -1442,10 +1885,25 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                         # 단일 토큰 형태
                         merged = merge_boxes(val_words)
                         if merged:
-                            combined_text = re.sub(r'[\[\]]', '', "".join(w['text'] for w in val_words))
-                            sub_masks = calculate_sub_masks(combined_text, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
-                            if sub_masks:
-                                mask_regions.extend(sub_masks)
+                            # BANK_PATTERN(하이픈 필수)로 먼저 시도
+                            if BANK_PATTERN.search(combined_norm_bank):
+                                sub_masks = calculate_sub_masks(combined_norm_bank, merged['x'], merged['y'], merged['width'], merged['height'], name_mask_style)
+                                if sub_masks:
+                                    mask_regions.extend(sub_masks)
+                                else:
+                                    mask_regions.append(merged)
+                            elif BANK_PATTERN_NO_DASH.search(combined_norm_bank):
+                                # 하이픈 없는 계좌번호: 레이블 컨텍스트 있으므로 마지막 6자리 마스킹
+                                digits_no_dash = re.sub(r'\D', '', combined_norm_bank)
+                                if len(digits_no_dash) >= 10:
+                                    mask_start_ratio = (len(digits_no_dash) - 6) / max(1, len(digits_no_dash))
+                                    mask_x = int(merged['x'] + mask_start_ratio * merged['width'])
+                                    mask_w = merged['width'] - (mask_x - merged['x'])
+                                    if mask_w > 0:
+                                        mask_regions.append({
+                                            'x': mask_x, 'y': merged['y'],
+                                            'width': mask_w, 'height': merged['height']
+                                        })
                             else:
                                 mask_regions.append(merged)
                 else:
@@ -1510,12 +1968,13 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                     
             if addr_words:
                 # ── 개별 단어 단위 상세주소 판별 마스킹 ────────────────────────────
+                # [1단계] 기본 주소(행정구역 키워드 포함 단어) vs 상세주소(동/호/층 등) 구분
                 seen_base_addr = False
                 for aw in addr_words:
                     aw_text_norm = re.sub(r'[\[\]]', '', aw['text']).strip()
                     if not aw_text_norm:
                         continue
-                    
+
                     has_kw = False
                     last_kw_idx = -1
                     # 행정구역 키워드 검색
@@ -1524,41 +1983,58 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                         if idx != -1:
                             has_kw = True
                             last_kw_idx = max(last_kw_idx, idx)
-                            
+
                     # 단어 내에서 숫자의 시작 위치 탐색
                     num_match = re.search(r'\d', aw_text_norm)
                     num_start_idx = num_match.start() if num_match else -1
-                    
+
+                    # ── [2단계] 동/호/층 상세주소 패턴 탐지 ──────────────────────
+                    # 행정구역 키워드가 없는 단어라도 동/호/층 패턴이 있으면 상세주소로 처리
+                    unit_match = UNIT_DETAIL_PATTERN.search(aw_text_norm)
+
                     if has_kw:
                         seen_base_addr = True
-                        
-                        # 1. 키워드 이후에 숫자가 있는 경우 (예: "대연3동54-1")
+
+                        # 키워드 이후에 숫자가 있는 경우 (예: "대연3동54-1")
                         after_kw_str = aw_text_norm[last_kw_idx + 1:]
                         num_match_after = re.search(r'\d', after_kw_str)
-                        
+
                         if num_match_after:
                             split_idx = (last_kw_idx + 1) + num_match_after.start()
                             char_w = aw['width'] / max(1, len(aw_text_norm))
-                            mask_regions.append({
-                                'x': int(aw['x'] + split_idx * char_w),
-                                'y': aw['y'],
-                                'width': int((len(aw_text_norm) - split_idx) * char_w),
-                                'height': aw['height']
-                            })
-                        # 2. 키워드 이전 또는 키워드 포함 부위에 숫자가 있는 경우 (예: "123번길", "대연3동")
+                            # [3단계] 건물번호 이후 동/호/층 추가 마스킹 확인
+                            after_num_text = aw_text_norm[split_idx:]
+                            unit_m_inner = UNIT_DETAIL_PATTERN.search(after_num_text)
+                            if unit_m_inner:
+                                # 동/호/층 식별자만 마스킹
+                                id_start = split_idx + unit_m_inner.start(1)
+                                id_len = len(unit_m_inner.group(1))
+                                mask_regions.append({
+                                    'x': int(aw['x'] + id_start * char_w),
+                                    'y': aw['y'],
+                                    'width': int(id_len * char_w),
+                                    'height': aw['height']
+                                })
+                            else:
+                                # 숫자 시작부터 전체 마스킹
+                                mask_regions.append({
+                                    'x': int(aw['x'] + split_idx * char_w),
+                                    'y': aw['y'],
+                                    'width': int((len(aw_text_norm) - split_idx) * char_w),
+                                    'height': aw['height']
+                                })
+                        # 키워드 이전/포함 위치에 숫자 있는 경우 (예: "123번길", "대연3동")
                         elif num_start_idx != -1:
-                            # 숫자 부분부터 키워드까지의 텍스트 추출
                             num_to_kw = aw_text_norm[num_start_idx:last_kw_idx + 1]
                             num_part = re.sub(r'\D', '', num_to_kw)
                             kw_part = re.sub(r'\d', '', num_to_kw)
-                            
-                            # 1자리 숫자 + [동/가/읍/면/시/도] 인 경우는 행정구역 번호이므로 노출 유지
+
+                            # 1자리 숫자 + [동/가/읍/면/시/도] = 행정구역 번호 → 노출 유지
                             is_admin_dong = len(num_part) == 1 and kw_part in ["동", "가", "읍", "면", "시", "도"]
-                            
+
                             if is_admin_dong:
                                 pass
                             else:
-                                # 그 외의 건물번호(123번길 등)나 도로명 숫자는 숫자 시작 위치부터 마스킹
                                 split_idx = num_start_idx
                                 char_w = aw['width'] / max(1, len(aw_text_norm))
                                 mask_regions.append({
@@ -1568,7 +2044,7 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                                     'height': aw['height']
                                 })
                         else:
-                            # 숫자가 없는데 키워드 이후에 문자가 더 붙어 있다면 부분 마스킹
+                            # 숫자 없음, 키워드 이후 문자가 더 있으면 부분 마스킹
                             if last_kw_idx + 1 < len(aw_text_norm):
                                 split_idx = last_kw_idx + 1
                                 char_w = aw['width'] / max(1, len(aw_text_norm))
@@ -1578,8 +2054,25 @@ def detect_layout_based_info_and_indices(words, name_mask_style="middle"):
                                     'width': int((len(aw_text_norm) - split_idx) * char_w),
                                     'height': aw['height']
                                 })
+
+                    elif unit_match:
+                        # ── [3단계] 기본주소 키워드 없지만 동/호/층 패턴 있는 단어 ─
+                        # 예: "101동", "202호", "3층", "B1" → 식별자(숫자)만 마스킹
+                        seen_base_addr = True  # 상세주소 구간 진입으로 간주
+                        char_w = aw['width'] / max(1, len(aw_text_norm))
+                        for um in UNIT_DETAIL_PATTERN.finditer(aw_text_norm):
+                            id_start = um.start(1)
+                            id_len = len(um.group(1))
+                            mask_regions.append({
+                                'x': int(aw['x'] + id_start * char_w),
+                                'y': aw['y'],
+                                'width': int(id_len * char_w),
+                                'height': aw['height']
+                            })
+                            print(f"[주소-동호층] {aw_text_norm!r} → 식별자 {um.group(1)!r} 마스킹")
+
                     else:
-                        # 행정구역 키워드가 없으면서, 이미 기본 주소를 지났거나 첫 단어부터 없는 경우 상세주소 단어로 간주하여 박스 전체 마스킹
+                        # 행정구역 키워드도 동/호/층도 없는 단어 → 상세주소 전체 마스킹
                         mask_regions.append({
                             'x': aw['x'], 'y': aw['y'],
                             'width': aw['width'], 'height': aw['height']
@@ -1712,11 +2205,112 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
 
     used_word_indices.update(split_phone_used_indices)
 
+    # ── 2-b. 분리된 차량번호 입력 필드 탐지 ─────────────────────────────────────
+    # UI에서 차량번호가 '[12가]', '[3456]' 또는 '[12]', '[가]', '[3456]' 형태로 분리된 경우 처리
+    # 같은 행에서 숫자2~3자리 + 차량용한글1자 + 숫자4자리 패턴을 슬라이딩 윈도우로 탐색
+    split_vehicle_used_indices = set()
+    if words:
+        sorted_for_veh = sorted(words, key=lambda w: (w['y'], w['x']))
+        row_groups_veh = []
+        cur_row_veh = [sorted_for_veh[0]]
+        for wi in sorted_for_veh[1:]:
+            if abs(wi['y'] - cur_row_veh[0]['y']) <= max(cur_row_veh[0]['height'] * 0.8, 8):
+                cur_row_veh.append(wi)
+            else:
+                row_groups_veh.append(cur_row_veh)
+                cur_row_veh = [wi]
+        row_groups_veh.append(cur_row_veh)
+
+        for row_veh in row_groups_veh:
+            row_veh.sort(key=lambda w: w['x'])
+            n_veh = len(row_veh)
+            i_veh = 0
+            while i_veh < n_veh:
+                w_veh = row_veh[i_veh]
+                # 순수 숫자 추출 (대괄호 제거)
+                digits_veh = re.sub(r'[^0-9]', '', w_veh['text'])
+                # 첫 번째 세그먼트: 숫자 2~3자리
+                if not (2 <= len(digits_veh) <= 3 and digits_veh == re.sub(r'[^0-9]', '', re.sub(r'[\[\]]', '', w_veh['text']))):
+                    i_veh += 1
+                    continue
+                # 이미 처리된 단어인지 확인
+                idx_veh1 = next((idx for idx, w in enumerate(words) if w is w_veh), None)
+                if idx_veh1 is not None and idx_veh1 in used_word_indices:
+                    i_veh += 1
+                    continue
+
+                # 두 번째/세 번째 세그먼트 탐색 (인접 단어에서 차량용한글 + 숫자4자리)
+                j_veh = i_veh + 1
+                hangul_word = None
+                num4_word = None
+
+                while j_veh < n_veh:
+                    gap_veh = row_veh[j_veh]['x'] - (row_veh[j_veh-1]['x'] + row_veh[j_veh-1]['width'])
+                    # 너무 먼 경우 종료
+                    if gap_veh > max(w_veh['height'] * 10.0, 150):
+                        break
+                    txt_veh = re.sub(r'[\[\]\s]', '', row_veh[j_veh]['text'])
+                    only_hangul = re.sub(r'[^가-힣]', '', txt_veh)
+                    only_digits = re.sub(r'[^0-9]', '', txt_veh)
+
+                    if hangul_word is None:
+                        # 차량용 한글 1자 세그먼트 탐색
+                        if len(only_hangul) == 1 and only_hangul in VEHICLE_HANGUL_SET and len(txt_veh) <= 2:
+                            hangul_word = row_veh[j_veh]
+                        elif only_digits and len(only_digits) >= 3:
+                            break  # 한글 없이 숫자가 나오면 종료
+                    elif num4_word is None:
+                        # 숫자 4자리 세그먼트 탐색
+                        if len(only_digits) == 4 and not only_hangul:
+                            num4_word = row_veh[j_veh]
+                            break  # 찾았으면 종료
+                        elif only_hangul:
+                            break  # 또 한글이 나오면 종료
+                    j_veh += 1
+
+                if hangul_word and num4_word:
+                    idx_veh2 = next((idx for idx, w in enumerate(words) if w is hangul_word), None)
+                    idx_veh3 = next((idx for idx, w in enumerate(words) if w is num4_word), None)
+                    already_used_veh = any(
+                        ii is not None and ii in used_word_indices
+                        for ii in [idx_veh1, idx_veh2, idx_veh3]
+                    )
+                    if not already_used_veh:
+                        # 숫자4자리(num4_word) 전체 마스킹 (앞 숫자와 한글은 노출)
+                        mask_regions.append({
+                            'x': num4_word['x'], 'y': num4_word['y'],
+                            'width': num4_word['width'], 'height': num4_word['height']
+                        })
+                        for ii in [idx_veh1, idx_veh2, idx_veh3]:
+                            if ii is not None:
+                                split_vehicle_used_indices.add(ii)
+                        print(f"[분리차량] {w_veh['text']} / {hangul_word['text']} / {num4_word['text']} → 뒷번호 마스킹")
+                i_veh += 1
+
+    used_word_indices.update(split_vehicle_used_indices)
+
+    # ── 2-c. 앵커 키워드 기반 이름 탐지 ─────────────────────────────────────────
+    # 레이아웃 기반 탐지(1단계)에서 놓친 이름을 앵커 키워드 정규식 매칭으로 추가 탐지합니다.
+    # "성명: 홍길동", "피보험자 김철수", "홍길동 님" 같은 자연어 문맥에서 이름을 탐지합니다.
+    # detect_name_by_anchor는 _idx 필드가 설정된 단어 목록이 필요하므로 이 시점에서 호출합니다.
+    # (분리 전화/차량 탐지 이후 used_word_indices가 최신 상태여야 중복 방지 가능)
     for idx, w in enumerate(words):
         w['_idx'] = idx
-        
+
+    anchor_name_masks, anchor_name_indices = detect_name_by_anchor(
+        words, used_word_indices=used_word_indices, name_mask_style=name_mask_style
+    )
+    if anchor_name_masks:
+        mask_regions.extend(anchor_name_masks)
+        used_word_indices.update(anchor_name_indices)
+        print(f"[앵커이름] {len(anchor_name_masks)}개 이름 마스킹 영역 추가")
+
+    # _idx 재설정 (이후 슬라이딩 윈도우에서도 동일하게 사용)
+    for idx, w in enumerate(words):
+        w['_idx'] = idx
+
     sorted_words = sorted(words, key=lambda w: (w['y'], w['x']))
-    
+
     # 행(Line)별로 단어 그룹화
     lines = []
     current_line = []
@@ -1778,11 +2372,14 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
                 for pattern, p_type in [
                     (RRN_PATTERN, "rrn"), (PHONE_PATTERN, "phone"), 
                     (EMAIL_PATTERN, "email"), (CARD_PATTERN, "card"), 
-                    (BANK_PATTERN, "bank"), (BIRTH_PATTERN, "birth"),
+                    (BANK_PATTERN, "bank"),
+                    # BIRTH_PATTERN: 레이블 컨텍스트 없는 단독 날짜(2026-07-20 등)는 마스킹 대상 아님
+                    # 생년월일/생일 레이블 기반 탐지(detect_layout_based_info_and_indices)에서만 처리
+                    # (BIRTH_PATTERN, "birth"),  # <- 단독 탐지 비활성화
                     (PASSPORT_PATTERN, "passport"), (DRIVER_PATTERN, "driver"),
                     (IP_PATTERN, "ip"), (ADDRESS_PATTERN, "address"),
                     (VEHICLE_PATTERN, "vehicle"),
-                    (DISEASE_PATTERN, "disease"),  # 질병분류기호 추가
+                    (DISEASE_PATTERN, "disease"),  # 질병분류기호
                 ]:
                     if pattern.search(text_no_space) or pattern.search(text_with_space):
                         if p_type == "birth":
@@ -1833,9 +2430,46 @@ def detect_personal_info(ocr_result, name_mask_style="middle"):
                             digits = re.sub(r'\D', '', text_no_space)
                             if not verify_rrn_checksum(digits):
                                 continue
+                        elif p_type == "bank":
+                            # ── 계좌번호 오탐 Guard ──────────────────────────────────────────────
+                            # 단독 패턴 매칭 시: 하이픈이 반드시 포함되어야 함 (BANK_PATTERN이 이미 하이픈 필수)
+                            # 추가로 숫자-숫자-숫자 구조가 계좌번호 형태인지 재검증
+                            matched_bank = text_no_space if BANK_PATTERN.search(text_no_space) else text_with_space
+                            dash_count = matched_bank.count('-')
+                            if dash_count < 2:
+                                # 하이픈이 2개 미만이면 계좌번호 구조 아님 → 오탐 가능성 높음
+                                continue
+                            # 전화번호 패턴에도 매칭되는지 확인 → 전화번호가 우선
+                            if PHONE_PATTERN.search(text_no_space) or PHONE_PATTERN.search(text_with_space):
+                                continue  # 전화번호로 처리되도록 스킵 (전화번호가 먼저 처리됨)
+                        elif p_type == "disease":
+                            # ── 질병분류기호 오탐 Guard ──────────────────────────────────────────
+                            # DISEASE_STANDALONE_ENABLED=False 이면 레이블 없는 단독 탐지 금지
+                            if not DISEASE_STANDALONE_ENABLED:
+                                continue  # 레이아웃 기반 탐지(1단계)에서만 탐지 허용
+                        elif p_type == "driver":
+                            # ── 운전면허번호 오탐 Guard ──────────────────────────────────────────
+                            # 10자리 연속 숫자가 전화번호(010xxxxxxxx)와 겹칠 수 있음
+                            digits_driver = re.sub(r'\D', '', text_no_space)
+                            if len(digits_driver) == 10 or len(digits_driver) == 11:
+                                # 전화번호 패턴 우선 확인
+                                if re.match(r'^01[0-9]\d{7,8}$', digits_driver) or re.match(r'^0[2-6]\d{7,8}$', digits_driver):
+                                    continue  # 전화번호로 처리되도록 스킵
+                            # 대시 없는 10자리 숫자 단독 매칭 시 오탐 가능성 높음 → 대시 없으면 제외
+                            if '-' not in text_no_space and '-' not in text_with_space:
+                                # 대시 없는 10자리 연속 숫자는 사번/주문번호 등과 혼동 → 제외
+                                continue
+                        elif p_type == "vehicle":
+                            # ── 차량번호 오탐 Guard ──────────────────────────────────────────────
+                            # 실제 차량용 한글이 포함되어 있는지 검증
+                            matched_vehicle = text_no_space if VEHICLE_PATTERN.search(text_no_space) else text_with_space
+                            has_vehicle_hangul = any(c in VEHICLE_HANGUL_SET for c in matched_vehicle)
+                            if not has_vehicle_hangul:
+                                continue  # 차량용 한글 없으면 오탐 → 제외
                         is_pi = True
                         matched_type = p_type
                         break
+
                         
                 # 2단계: 한국어 이름 단독/조합 검출 (단어 길이 2~4글자)
                 if not is_pi:

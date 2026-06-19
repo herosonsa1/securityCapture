@@ -458,13 +458,34 @@ class PrivacyMaskerApp:
         self.warning_active = True
 
         def run_warning():
-            from tkinter import messagebox
-            messagebox.showwarning(
-                "캡처 불가 안내",
-                "다른 캡쳐프로그램은 사용이 불가합니다.\n'F9' 키를 활용해 캡쳐해주세요.",
-                parent=self.root
-            )
-            self.warning_active = False
+            try:
+                from tkinter import messagebox
+                # ── self.root는 withdraw() 상태이므로 직접 parent로 쓰면
+                #    경고창이 다른 창 뒤에 숨어 보이지 않을 수 있음.
+                #    topmost 임시 Toplevel을 parent로 사용하여 최상위 표시 보장.
+                popup = tk.Toplevel(self.root)
+                popup.withdraw()                          # 창 자체는 숨김
+                popup.wm_attributes('-topmost', True)     # 최상위 레이어 고정
+                popup.focus_force()                       # 포커스 강제 취득
+                messagebox.showwarning(
+                    "캡처 불가 안내",
+                    "다른 캡쳐프로그램은 사용이 불가합니다.\n'F9' 키를 활용해 캡쳐해주세요.",
+                    parent=popup
+                )
+                popup.destroy()
+            except Exception as e:
+                print(f"경고 창 표시 실패: {e}")
+                # 폴백: 트레이 알림으로 대체
+                if self.tray_icon:
+                    try:
+                        self.tray_icon.notify(
+                            "다른 캡쳐프로그램은 사용이 불가합니다.\n'F9' 키를 활용해 캡쳐해주세요.",
+                            "캡처 불가 안내"
+                        )
+                    except Exception:
+                        pass
+            finally:
+                self.warning_active = False
 
         self.root.after(0, run_warning)
 
