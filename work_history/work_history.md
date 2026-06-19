@@ -630,3 +630,90 @@ if img_w != width or img_h != height:
 
 
 
+
+---
+
+## 2026-06-19 - 타 캡처프로그램 차단 기능 재구현 (WH_KEYBOARD_LL 전용 스레드 방식)
+
+### 작업 배경
+
+- 사용자 요청: PrintScreen, Alt+PrintScreen, Ctrl+PrintScreen, Win+Shift+S 등의 캡처 단축키를 OS 수준에서 인터셉트하여 차단하고, F9 키만 캡처 가능하도록 구현
+- 차단 시 "다른 캡쳐프로그램은 사용이 불가합니다. 'F9' 키를 활용해 캡쳐해주세요." 경고창 표시
+
+---
+
+### 최종 구현 아키텍처
+
+기존 pynput 기반 키보드 리스너를 완전히 폐기하고, Windows 저수준 전역 키보드 훅(WH_KEYBOARD_LL)을 ctypes로 직접 설치하는 방식으로 전환:
+
+1. 전용 데몬 스레드(KeyboardHookThread) 생성
+2. 해당 스레드 내부에서 SetWindowsHookExW(WH_KEYBOARD_LL, ...) 호출
+3. 전용 GetMessage/DispatchMessage Win32 메시지 루프 운영
+4. 훅 콜백(low_level_keyboard_proc)에서 차단 대상 키는 return 1(nonzero), 그 외 키는 CallNextHookEx로 체인 전달
+
+이유: WH_KEYBOARD_LL 콜백은 훅을 설치한 스레드의 메시지 루프에서만 처리됩니다.
+Tkinter mainloop()는 Tcl/Tk 추상 레이어로 동작하므로 훅 콜백이 지연/누락될 수 있어 전용 스레드 분리가 필수입니다.
+
+---
+
+### 수정 파일
+
+- main.py
+
+---
+
+### 주요 이슈 및 해결 과정
+
+#### 이슈 1 - 훅 콜백 ArgumentError: expected WinFunctionType instance
+
+- 원인: HOOKPROC 타입을 hook_thread_worker 내부에서 중첩 정의하면 스레드 경계를 넘을 때 ctypes 타입 캐시 불일치 발생
+- 해결: HOOKPROC, KBDLLHOOKSTRUCT, MSG 타입을 start_keyboard_listener 메서드 스코프에서 한 번만 정의하여 클로저가 동일 타입 객체를 참조하도록 수정
+
+#### 이슈 2 - SetWindowsHookExW 오류 코드 126 (ERROR_MOD_NOT_FOUND)
+
+- 원인: hMod에 GetModuleHandleW(None) 전달 시 PyInstaller 빌드 EXE 환경에서 NULL(0) 반환
+- 해결: WH_KEYBOARD_LL 전역 훅은 hMod=NULL로도 정상 동작함. ctypes.c_void_p(0) 직접 전달
+
+#### 이슈 3 - return 0으로는 키 차단이 되지 않음
+
+- 원인: MSDN 문서에 따르면 "return a nonzero value to prevent the system from passing the message"
+  return 0은 처리 안 함으로 키가 시스템에 그대로 전달됨
+- 해결: 차단 대상 키 반환값을 return 0에서 return 1(nonzero)로 전면 수정
+
+#### 이슈 4 - return 1 적용 후 모든 키가 차단되는 현상 (핵심 버그)
+
+- 원인: CallNextHookEx 호출 시 argtypes 미지정으로 lParam(64비트 포인터)이 c_int(32비트)로 절삭되어 전달됨
+  CallNextHookEx가 잘못된 포인터로 실패하고 nonzero를 반환 -> 차단 대상이 아닌 모든 키까지 차단됨
+- 해결: CallNextHookEx의 argtypes/restype 명시 설정 및 _hook_handle.value 직접 전달
+
+  수정 전: return user32.CallNextHookEx(_hook_handle, nCode, wParam, lParam)
+  -> lParam 64비트 포인터가 32비트로 절삭 -> 모든 키 차단
+
+  수정 후:
+    _CallNext = user32.CallNextHookEx
+    _CallNext.restype  = ctypes.c_longlong   # LRESULT = 64비트
+    _CallNext.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    return _CallNext(_hook_handle.value, nCode, wParam, lParam)
+
+  또한 HOOKPROC 반환 타입도 c_long(32비트) -> c_longlong(64비트, LRESULT와 동일)으로 수정:
+    HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+---
+
+### 차단 대상 키 매핑
+
+| 단축키 | 가상 키 코드 | 처리 방식 |
+|--------|------------|---------|
+| PrintScreen | VK_SNAPSHOT = 0x2C | return 1 (무조건 차단 + 경고창) |
+| Alt+PrintScreen | VK_SNAPSHOT = 0x2C | return 1 (동일 VK 코드) |
+| Ctrl+PrintScreen | VK_SNAPSHOT = 0x2C | return 1 (동일 VK 코드) |
+| Win+Shift+S | VK_S = 0x53 + GetAsyncKeyState 조합 검사 | return 1 (조합키 확인 후 차단 + 경고창) |
+| F9 | VK_F9 = 0x78 | return 1 + 캡처 트리거 |
+| 그 외 모든 키 | - | CallNextHookEx로 정상 전달 |
+
+---
+
+### 검증 및 빌드
+
+- PyInstaller build_exe.py를 통해 dist/PrivacyMasker.exe 재빌드 완료 (총 4회 재빌드)
+- 디버그 로그(%TEMP%\privacy_masker_debug.log)에서 [Keyboard] WH_KEYBOARD_LL 훅 설치 완료 전용 메시지 루프 시작 확인

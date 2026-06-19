@@ -19,7 +19,6 @@ import tkinter as tk
 import winreg
 from PIL import Image, ImageDraw
 import pystray
-from pynput import keyboard
 
 # 내부 모듈 로드
 from capture_window import CaptureWindow
@@ -45,6 +44,14 @@ class PrivacyMaskerApp:
         
         # 자체 복사 시 클립보드 보호 차단 우회 플래그
         self.skip_clipboard_clear = False
+        
+        # 경고 알림창 중복 활성화 방지 플래그
+        self.warning_active = False
+        
+        # 훅 관련 내부 변수
+        self._hook_handle = None
+        self._hook_thread_id = None
+        self._hook_proc = None
 
     def create_tray_image(self):
         """
@@ -287,12 +294,16 @@ class PrivacyMaskerApp:
                 pass
             self.tray_icon = None
             
-        # 2. 리스너 중지
+        # 2. 키보드 훅 해제 및 훅 스레드 메시지 루프 종료
         if self.keyboard_listener:
             try:
-                self.keyboard_listener.stop()
+                import ctypes
+                # 훅 스레드에 WM_QUIT을 전달하여 GetMessage 루프를 종료시킴
+                if self._hook_thread_id:
+                    ctypes.windll.user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0)
             except:
                 pass
+            self.keyboard_listener = None
                 
         # 3. Tkinter 루프 종료
         if self.root:
@@ -431,35 +442,183 @@ class PrivacyMaskerApp:
         # 1. 시스템 트레이 시작
         self.start_tray()
         
-        # 2. 단일 통합 전역 키보드 리스너 구동 (F9 핫키 감지 통합)
+        # 2. 전역 키보드 훅 설치 (전용 스레드 방식)
         self.start_keyboard_listener()
 
         # 3. 콘솔 상태 출력
         self.show_app_info()
 
+    def show_capture_blocked_warning(self):
+        """
+        타 캡처프로그램 사용 차단 경고 메시지 창을 표시합니다.
+        중복 실행을 방지하기 위해 warning_active 플래그로 보호합니다.
+        """
+        if self.warning_active:
+            return
+        self.warning_active = True
+
+        def run_warning():
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "캡처 불가 안내",
+                "다른 캡쳐프로그램은 사용이 불가합니다.\n'F9' 키를 활용해 캡쳐해주세요.",
+                parent=self.root
+            )
+            self.warning_active = False
+
+        self.root.after(0, run_warning)
+
     def start_keyboard_listener(self):
         """
-        단 하나의 전역 키보드 리스너를 가동하여 F9 핫키 감지, PrintScreen 및 Windows+Shift+S 차단을 일괄 처리합니다.
-        pynput 리스너 중복 구동으로 인한 윈도우 훅 충돌을 원천 차단합니다.
+        WH_KEYBOARD_LL 저수준 전역 키보드 훅을 전용 데몬 스레드에서 설치합니다.
+        훅은 설치한 스레드의 메시지 루프에서만 콜백을 받기 때문에,
+        전용 스레드에서 GetMessage/DispatchMessage 루프를 운영하여
+        훅 콜백이 즉시·안정적으로 처리되도록 합니다.
         """
         if self.keyboard_listener:
             return
 
-        def win32_filter(msg, data):
-            # 1. F9 단축키 처리 (VK_F9 = 0x78)
-            # WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104
-            if data.vkCode == 0x78:
-                if msg in (0x0100, 0x0104):
-                    self.root.after(0, self.on_hotkey_triggered)
-                return False  # 시스템 전파 차단하여 핫키만 삼킴
-            return True
+        import ctypes
+        import ctypes.wintypes as wintypes
 
-        try:
-            self.keyboard_listener = keyboard.Listener(win32_event_filter=win32_filter)
-            self.keyboard_listener.start()
-            print("[Keyboard] 단일 통합 키보드 리스너 구동 시작")
-        except Exception as e:
-            print(f"[Keyboard] 통합 키보드 리스너 기동 실패: {e}")
+        user32   = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN     = 0x0100
+        WM_SYSKEYDOWN  = 0x0104
+
+        # ── ctypes 구조체·함수 타입 정의 ──────────────────────────────────────
+        # 스레드 내부가 아닌 메서드 스코프에서 한 번만 정의해야 타입 캐시 불일치 오류를 방지합니다.
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode",      wintypes.DWORD),
+                ("scanCode",    wintypes.DWORD),
+                ("flags",       wintypes.DWORD),
+                ("time",        wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class MSG(ctypes.Structure):
+            _fields_ = [
+                ("hwnd",    wintypes.HWND),
+                ("message", wintypes.UINT),
+                ("wParam",  wintypes.WPARAM),
+                ("lParam",  wintypes.LPARAM),
+                ("time",    wintypes.DWORD),
+                ("pt",      wintypes.POINT),
+            ]
+
+        # HOOKPROC: SetWindowsHookExW에 전달하는 콜백 함수 타입
+        # 이 타입은 메서드 스코프에서 한 번만 생성되어 스레드 내부의 클로저로 캡처됩니다.
+        # LRESULT = LONG_PTR = 64비트(c_longlong). 반환 타입을 정확히 지정해야 합니다.
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        # ── 훅 스레드 작업 함수 ───────────────────────────────────────────────
+
+        def hook_thread_worker():
+            """
+            전용 Win32 메시지 루프를 운영하는 훅 스레드입니다.
+            SetWindowsHookExW → GetMessage 루프 → UnhookWindowsHookEx 순서로 실행됩니다.
+            """
+            self._hook_thread_id = kernel32.GetCurrentThreadId()
+
+            _hook_handle = ctypes.c_void_p()
+
+            # CallNextHookEx argtypes/restype 미리 설정
+            # argtypes 없이 호출하면 lParam(64비트 포인터)이 c_int(32비트)로 절삭되어
+            # CallNextHookEx가 실패하고 nonzero를 반환 → 모든 키 차단 버그 발생
+            _CallNext = user32.CallNextHookEx
+            _CallNext.restype  = ctypes.c_longlong
+            _CallNext.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+
+            def low_level_keyboard_proc(nCode, wParam, lParam):
+                """
+                저수준 키보드 훅 콜백 함수입니다.
+                차단 대상 키는 0을 반환하여 CallNextHookEx를 호출하지 않음으로써
+                OS 훅 체인에서 키 이벤트를 완전히 소멸시킵니다.
+                """
+                if nCode >= 0:
+                    kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                    vk = kb.vkCode
+                    is_key_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+
+                    # 1. F9 단축키 처리 (VK_F9 = 0x78) - 프로그램 캡처 트리거
+                    if vk == 0x78:
+                        if is_key_down:
+                            self.root.after(0, self.on_hotkey_triggered)
+                        # nonzero 반환: 시스템 및 다음 훅에 전달하지 않음 (MSDN: return nonzero to prevent)
+                        return 1
+
+                    # 2. PrintScreen 단축키 처리 (VK_SNAPSHOT = 0x2C)
+                    # PrintScreen, Alt+PrintScreen, Ctrl+PrintScreen, Ctrl+Alt+PrintScreen 모두 0x2C 발생
+                    if vk == 0x2C:
+                        if is_key_down:
+                            self.show_capture_blocked_warning()
+                        # nonzero 반환: OS 수준에서 캡처 이벤트 완전 차단
+                        return 1
+
+                    # 3. Win + Shift + S 단축키 처리 (VK_S = 0x53)
+                    if vk == 0x53:
+                        # VK_LWIN = 0x5B, VK_RWIN = 0x5C, VK_SHIFT = 0x10
+                        win_pressed   = (user32.GetAsyncKeyState(0x5B) & 0x8000) or \
+                                        (user32.GetAsyncKeyState(0x5C) & 0x8000)
+                        shift_pressed = (user32.GetAsyncKeyState(0x10) & 0x8000)
+                        if win_pressed and shift_pressed:
+                            if is_key_down:
+                                self.show_capture_blocked_warning()
+                            # nonzero 반환: 윈도우 기본 캡처 도구 실행 완전 차단
+                            return 1
+
+                # 처리 대상이 아닌 모든 키는 다음 훅으로 정상 전달
+                return _CallNext(_hook_handle.value, nCode, wParam, lParam)
+
+            # HOOKPROC 인스턴스 생성 (가비지 컬렉션 방지를 위해 인스턴스 변수에 보관)
+            self._hook_proc = HOOKPROC(low_level_keyboard_proc)
+
+            # WH_KEYBOARD_LL 훅 설치
+            # PyInstaller 빌드 환경에서 GetModuleHandleW(None)은 NULL을 반환할 수 있습니다.
+            # WH_KEYBOARD_LL은 전역 훅(dwThreadId=0)이므로 hMod=NULL(0)으로도 정상 동작합니다.
+            _SetHook = user32.SetWindowsHookExW
+            _SetHook.restype  = ctypes.c_void_p
+            _SetHook.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wintypes.DWORD]
+
+            _hook_handle.value = _SetHook(
+                WH_KEYBOARD_LL,
+                self._hook_proc,
+                ctypes.c_void_p(0),  # hMod=NULL: 전역 저수준 훅은 NULL 핸들로도 동작
+                0
+            )
+
+            if not _hook_handle.value:
+                err = kernel32.GetLastError()
+                print(f"[Keyboard] 저수준 키보드 훅 설치 실패 (오류 코드: {err})")
+                return
+
+            self._hook_handle = _hook_handle.value
+            print("[Keyboard] WH_KEYBOARD_LL 훅 설치 완료 — 전용 메시지 루프 시작")
+
+            # 전용 Win32 메시지 루프
+            # GetMessage는 WM_QUIT(0x0012)를 받으면 0을 반환하여 루프를 종료시킵니다.
+            msg = MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+
+            # 루프 종료 후 훅 해제
+            if _hook_handle.value:
+                user32.UnhookWindowsHookEx(_hook_handle.value)
+                self._hook_handle = None
+            print("[Keyboard] WH_KEYBOARD_LL 훅 해제 및 메시지 루프 종료")
+
+        # 전용 데몬 스레드 구동 (프로그램 종료 시 자동 소멸)
+        t = threading.Thread(target=hook_thread_worker, daemon=True, name="KeyboardHookThread")
+        t.start()
+        self.keyboard_listener = t
+        print("[Keyboard] 전용 키보드 훅 스레드 시작")
+
+
 
     def show_app_info(self):
         """
