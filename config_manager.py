@@ -55,9 +55,9 @@ def save_config(config):
         print(f"설정 파일 저장 실패: {e}")
         return False
 
-def copy_image_to_clipboard(image, signature_text="PrivacyMasker_Signature_829cf3"):
+def copy_image_to_clipboard(image):
     """
-    ctypes를 활용하여 PIL Image 객체와 고유 텍스트 시그니처를 윈도우 클립보드에 동시에 삽입합니다.
+    ctypes를 활용하여 PIL Image 객체를 윈도우 클립보드에 삽입합니다.
     외부 프로세스(powershell 등) 호출이 없어 속도가 매우 빠르고 Blocker와의 경합을 방지합니다.
     """
     import ctypes
@@ -91,7 +91,6 @@ def copy_image_to_clipboard(image, signature_text="PrivacyMasker_Signature_829cf
     # 상수 정의
     GHND = 0x0042  # GMEM_MOVEABLE | GMEM_ZEROINIT
     CF_DIB = 8
-    CF_UNICODETEXT = 13
 
     # 1. PIL 이미지를 BMP 포맷으로 변환하여 DIB 바이너리 추출
     try:
@@ -125,24 +124,6 @@ def copy_image_to_clipboard(image, signature_text="PrivacyMasker_Signature_829cf
                 print("[클립보드] SetClipboardData(CF_DIB) 실패")
         else:
             print("[클립보드] GlobalLock(DIB) 실패")
-            return False
-
-        # 4. 시그니처 텍스트 쓰기
-        sig_bytes = signature_text.encode('utf-16le') + b'\x00\x00'
-        h_txt = kernel32.GlobalAlloc(GHND, len(sig_bytes))
-        if not h_txt:
-            print("[클립보드] GlobalAlloc(Text) 실패")
-            return False
-            
-        p_txt = kernel32.GlobalLock(h_txt)
-        if p_txt:
-            ctypes.memmove(p_txt, sig_bytes, len(sig_bytes))
-            kernel32.GlobalUnlock(h_txt)
-            res2 = user32.SetClipboardData(CF_UNICODETEXT, h_txt)
-            if not res2:
-                print("[클립보드] SetClipboardData(CF_UNICODETEXT) 실패")
-        else:
-            print("[클립보드] GlobalLock(Text) 실패")
             return False
 
         return True
