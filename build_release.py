@@ -167,6 +167,20 @@ def run_pyinstaller():
         abs_src = SCRIPT_DIR / src
         add_data_args += [f"--add-data={abs_src};{dst}"]
 
+    # --hidden-import 인자 구성 (PyInstaller가 자동 감지하지 못하는 모듈)
+    hidden_imports = [
+        "pystray",
+        "pystray._base",
+        "pystray._win32",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "tkinter",
+        "tkinter.simpledialog",
+        "tkinter.messagebox",
+    ]
+    hidden_import_args = [f"--hidden-import={mod}" for mod in hidden_imports]
+
     args = [
         str(SCRIPT_DIR / ENTRY_SCRIPT),
         "--onefile",                    # 단일 EXE
@@ -178,6 +192,7 @@ def run_pyinstaller():
         "--clean",                      # 빌드 캐시 클리어
         "--noupx",                      # UPX 압축 생략 (안정성)
         *add_data_args,
+        *hidden_import_args,
     ]
 
     print("\n  [PyInstaller 실행]")

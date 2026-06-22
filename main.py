@@ -52,6 +52,9 @@ class PrivacyMaskerApp:
         self._hook_handle = None
         self._hook_thread_id = None
         self._hook_proc = None
+        
+        # 관리자 암호 다이얼로그 활성 상태 플래그 (F9 캡처 차단용)
+        self._password_dialog_active = False
 
     def create_tray_image(self):
         """
@@ -73,6 +76,9 @@ class PrivacyMaskerApp:
         """
         단축키 입력 시 실행되는 콜백 함수 (스레드-세이프하게 Tkinter 루프에 전달)
         """
+        # 관리자 암호 다이얼로그가 열려 있으면 F9 캡처 무시
+        if self._password_dialog_active:
+            return
         # 캡처 중이 아니거나, 캡처 중이더라도 활성화된 편집 창이 떠 있다면 핫키 트리거 허용
         if not self.capturing or self.current_edit_win:
             self.root.after(0, self.trigger_capture)
@@ -253,8 +259,14 @@ class PrivacyMaskerApp:
                 self.toggle_startup,
                 checked=lambda item: self.is_in_startup()
             ),
+            # 타 캡쳐프로그램 금지 토글
+            pystray.MenuItem(
+                "타 캡쳐프로그램 금지",
+                self.toggle_block_captures,
+                checked=lambda item: self.config.get("block_other_captures", True)
+            ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("종료", lambda icon, item: self.root.after(0, self.exit_app))
+            pystray.MenuItem("종료", lambda icon, item: self.request_exit_app())
         )
         
         self.tray_icon = pystray.Icon(
@@ -276,6 +288,14 @@ class PrivacyMaskerApp:
                 )
             except Exception as e:
                 print(f"알림 팝업 전송 실패: {e}")
+
+    def request_exit_app(self):
+        """
+        트레이 메뉴에서 '종료' 클릭 시 관리자 암호를 확인한 후 종료합니다.
+        """
+        if not self.verify_admin_password("프로그램 종료"):
+            return
+        self.root.after(0, self.exit_app)
 
     def exit_app(self):
         """
@@ -390,6 +410,18 @@ class PrivacyMaskerApp:
             print(f"시작 프로그램 등록 중 예외: {e}")
             return False
 
+    def _auto_register_startup(self):
+        """
+        프로그램 최초 구동 시 윈도우 시작 프로그램에 자동 등록합니다.
+        이미 등록되어 있으면 중복 등록을 건너뜁니다.
+        """
+        if not self.is_in_startup():
+            ok = self.add_to_startup()
+            if ok:
+                print("[자동등록] 윈도우 시작 프로그램에 자동 등록 완료")
+            else:
+                print("[자동등록] 윈도우 시작 프로그램 자동 등록 실패 (개발 환경이거나 권한 부족)")
+
     def remove_from_startup(self):
         """
         윈도우 시작 프로그램에서 현재 실행 파일 등록을 해제합니다.
@@ -412,11 +444,106 @@ class PrivacyMaskerApp:
             print(f"시작 프로그램 해제 중 예외: {e}")
             return False
 
+    # ── 관리자 암호 상수 ──────────────────────────────────────────────────
+    _ADMIN_PASSWORD = "Herosonsa1!"
+
+    def verify_admin_password(self, action_description="보안 설정 변경"):
+        """
+        보안 기능 비활성화 시 관리자 암호를 입력받아 검증합니다.
+        올바른 암호 입력 시 True, 취소 또는 오류 시 False를 반환합니다.
+        """
+        result = [None]  # 스레드 간 결과 전달용
+        event = threading.Event()
+        
+        def ask_password():
+            try:
+                self._password_dialog_active = True
+                
+                # 커스텀 암호 입력 다이얼로그 생성
+                dialog = tk.Toplevel(self.root)
+                dialog.title("관리자 인증")
+                dialog.resizable(False, False)
+                dialog.wm_attributes('-topmost', True)
+                dialog.grab_set()  # 모달 처리
+                
+                # 창 크기 및 화면 중앙 배치
+                dlg_width, dlg_height = 380, 180
+                screen_w = dialog.winfo_screenwidth()
+                screen_h = dialog.winfo_screenheight()
+                x = (screen_w - dlg_width) // 2
+                y = (screen_h - dlg_height) // 2
+                dialog.geometry(f"{dlg_width}x{dlg_height}+{x}+{y}")
+                dialog.minsize(dlg_width, dlg_height)
+                
+                # 안내 문구
+                label = tk.Label(
+                    dialog,
+                    text=f"{action_description}을(를) 위해\n관리자 암호를 입력하세요:",
+                    font=("맑은 고딕", 10),
+                    justify="center",
+                    pady=10
+                )
+                label.pack(padx=20, pady=(15, 5))
+                
+                # 암호 입력 필드
+                entry = tk.Entry(dialog, show='*', font=("맑은 고딕", 12), width=28)
+                entry.pack(padx=20, pady=5)
+                entry.focus_set()
+                
+                # 버튼 프레임
+                btn_frame = tk.Frame(dialog)
+                btn_frame.pack(pady=(15, 10))
+                
+                def on_ok(evt=None):
+                    password = entry.get()
+                    if password == self._ADMIN_PASSWORD:
+                        result[0] = True
+                    else:
+                        from tkinter import messagebox
+                        messagebox.showerror(
+                            "인증 실패",
+                            "관리자 암호가 올바르지 않습니다.",
+                            parent=dialog
+                        )
+                        result[0] = False
+                    dialog.destroy()
+                
+                def on_cancel(evt=None):
+                    result[0] = False
+                    dialog.destroy()
+                
+                ok_btn = tk.Button(btn_frame, text="확인", width=10, command=on_ok)
+                ok_btn.pack(side="left", padx=8)
+                cancel_btn = tk.Button(btn_frame, text="취소", width=10, command=on_cancel)
+                cancel_btn.pack(side="left", padx=8)
+                
+                # Enter/Escape 키 바인딩
+                dialog.bind("<Return>", on_ok)
+                dialog.bind("<Escape>", on_cancel)
+                dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+                
+                dialog.wait_window()
+            except Exception as e:
+                print(f"암호 입력 다이얼로그 오류: {e}")
+                result[0] = False
+            finally:
+                self._password_dialog_active = False
+                event.set()
+        
+        # 메인 스레드(Tkinter)에서 실행
+        self.root.after(0, ask_password)
+        event.wait(timeout=120)  # 최대 2분 대기
+        return result[0] if result[0] is not None else False
+
     def toggle_startup(self, icon, item):
         """
         트레이 메뉴에서 '시작 프로그램 등록' 항목 클릭 시 등록/해제를 토글합니다.
+        비활성화(해제) 시에는 관리자 암호 인증을 요구합니다.
         """
         if self.is_in_startup():
+            # 비활성화 시 관리자 암호 요구
+            if not self.verify_admin_password("윈도우 시작 시 자동 실행 해제"):
+                return
             ok = self.remove_from_startup()
             if self.tray_icon:
                 msg = "시작 프로그램 등록이 해제되었습니다." if ok else "등록 해제에 실패했습니다."
@@ -435,10 +562,47 @@ class PrivacyMaskerApp:
         if self.tray_icon:
             self.tray_icon.update_menu()
 
+    def toggle_block_captures(self, icon, item):
+        """
+        트레이 메뉴에서 '타 캡쳐프로그램 금지' 항목 클릭 시 활성/비활성을 토글합니다.
+        비활성화 시에는 관리자 암호 인증을 요구합니다.
+        """
+        self.config = load_config()
+        current = self.config.get("block_other_captures", True)
+        
+        if current:
+            # 활성 → 비활성 전환: 관리자 암호 요구
+            if not self.verify_admin_password("타 캡쳐프로그램 금지 해제"):
+                return
+        
+        self.config["block_other_captures"] = not current
+        save_config(self.config)
+        
+        if self.tray_icon:
+            if not current:
+                msg = "타 캡쳐프로그램 금지가 활성화되었습니다.\nPrintScreen, Win+Shift+S 등의 캡처가 차단됩니다."
+            else:
+                msg = "타 캡쳐프로그램 금지가 해제되었습니다.\n다른 캡처 도구를 사용할 수 있습니다."
+            try:
+                self.tray_icon.notify(msg, "개인정보마스킹")
+            except Exception:
+                pass
+            self.tray_icon.update_menu()
+
     def setup_app_components(self):
         """
         Tkinter mainloop이 구동된 직후 안전하게 트레이 아이콘과 단축키 리스너를 켭니다.
         """
+        # 0. 최초 구동 시 윈도우 시작 프로그램에 자동 등록
+        self._auto_register_startup()
+        
+        # 0-1. 프로그램 기동 시 타 캡쳐프로그램 금지를 항상 활성화 (재시작 시 자동 복원)
+        self.config = load_config()
+        if not self.config.get("block_other_captures", True):
+            self.config["block_other_captures"] = True
+            save_config(self.config)
+            print("[자동복원] 타 캡쳐프로그램 금지 기능이 활성화 상태로 복원되었습니다.")
+        
         # 1. 시스템 트레이 시작
         self.start_tray()
         
@@ -574,14 +738,16 @@ class PrivacyMaskerApp:
 
                     # 2. PrintScreen 단축키 처리 (VK_SNAPSHOT = 0x2C)
                     # PrintScreen, Alt+PrintScreen, Ctrl+PrintScreen, Ctrl+Alt+PrintScreen 모두 0x2C 발생
-                    if vk == 0x2C:
+                    # block_other_captures 설정이 활성화된 경우에만 차단
+                    if vk == 0x2C and self.config.get("block_other_captures", True):
                         if is_key_down:
                             self.show_capture_blocked_warning()
                         # nonzero 반환: OS 수준에서 캡처 이벤트 완전 차단
                         return 1
 
                     # 3. Win + Shift + S 단축키 처리 (VK_S = 0x53)
-                    if vk == 0x53:
+                    # block_other_captures 설정이 활성화된 경우에만 차단
+                    if vk == 0x53 and self.config.get("block_other_captures", True):
                         # VK_LWIN = 0x5B, VK_RWIN = 0x5C, VK_SHIFT = 0x10
                         win_pressed   = (user32.GetAsyncKeyState(0x5B) & 0x8000) or \
                                         (user32.GetAsyncKeyState(0x5C) & 0x8000)
