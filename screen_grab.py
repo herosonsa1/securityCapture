@@ -67,6 +67,11 @@ def _grab_via_dxgi(region=None):
     """
     if not _DXCAM_AVAILABLE:
         return None
+    # 다중 모니터 대응: 보조 모니터 영역일 경우 DXGI(dxcam)는 캡처 오작동 가능성이 있으므로 건너뜁니다.
+    if region:
+        left, top, right, bottom = region
+        if left != 0 or top != 0:
+            return None
     try:
         cam = dxcam.create(output_color="RGB")
         # dxcam은 한 번 grab() 호출로 최신 프레임 1장을 즉시 반환
@@ -127,7 +132,8 @@ def _grab_via_gdi(region=None):
     if not _IMAGEGRAB_AVAILABLE:
         return None
     try:
-        return ImageGrab.grab(bbox=region, all_screens=(region is None))
+        # 다중 모니터의 전체 가상 화면을 아우르기 위해 all_screens=True로 설정합니다.
+        return ImageGrab.grab(bbox=region, all_screens=True)
     except Exception as e:
         print(f"[GDI] 획득 실패: {e}")
         return None
@@ -170,7 +176,10 @@ def _grab_via_win_printscreen(region=None):
         # 영역 크롭
         if region:
             left, top, right, bottom = region
-            img = img.crop((left, top, right, bottom))
+            # 가상 화면의 절대 위치 오프셋(SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77)을 빼서 0-기반 픽셀 좌표로 보정합니다.
+            v_left = ctypes.windll.user32.GetSystemMetrics(76)
+            v_top = ctypes.windll.user32.GetSystemMetrics(77)
+            img = img.crop((left - v_left, top - v_top, right - v_left, bottom - v_top))
 
         print(f"[Win+PrtSc] 파일 읽기 성공: {latest}")
         return img
@@ -224,7 +233,10 @@ def _grab_via_clipboard_printscreen(region=None):
 
         if region:
             left, top, right, bottom = region
-            img = img.crop((left, top, right, bottom))
+            # 가상 화면의 절대 위치 오프셋(SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77)을 빼서 0-기반 픽셀 좌표로 보정합니다.
+            v_left = ctypes.windll.user32.GetSystemMetrics(76)
+            v_top = ctypes.windll.user32.GetSystemMetrics(77)
+            img = img.crop((left - v_left, top - v_top, right - v_left, bottom - v_top))
 
         return img
     except Exception as e:
@@ -303,6 +315,51 @@ def _is_not_black(img, threshold=10, sample_ratio=0.01):
 
 def _log_method(method_name):
     print(f"[화면획득] 방법: {method_name}")
+
+
+def get_monitor_under_cursor():
+    """마우스 커서가 올라가 있는 모니터의 경계(left, top, width, height)를 반환합니다.
+    다중 모니터 환경에서 음수 좌표계가 있더라도 해당 모니터의 논리적/물리적 위치를 정확히 감지합니다.
+    """
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long)
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_ulong),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", ctypes.c_ulong)
+        ]
+
+    pt = POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    
+    # MONITOR_DEFAULTTONEAREST = 2
+    h_monitor = ctypes.windll.user32.MonitorFromPoint(pt, 2)
+    
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if ctypes.windll.user32.GetMonitorInfoW(h_monitor, ctypes.byref(info)):
+        rect = info.rcMonitor
+        left = rect.left
+        top = rect.top
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        return left, top, width, height
+    else:
+        # 실패 시 주 모니터 너비/높이 반환
+        width = ctypes.windll.user32.GetSystemMetrics(0)
+        height = ctypes.windll.user32.GetSystemMetrics(1)
+        return 0, 0, width, height
 
 
 def get_virtual_screen_bounds():

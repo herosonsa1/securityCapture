@@ -55,6 +55,9 @@ class PrivacyMaskerApp:
         
         # 관리자 암호 다이얼로그 활성 상태 플래그 (F9 캡처 차단용)
         self._password_dialog_active = False
+        
+        # 현재 활성화된 캡처 창 인스턴스 (ESC 키 전역 취소 처리용)
+        self.current_capture_win = None
 
     def create_tray_image(self):
         """
@@ -100,7 +103,11 @@ class PrivacyMaskerApp:
             while recapture:
                 # 1. 사각 영역 캡처 창 표시
                 cap_win = CaptureWindow(self.root)
-                crop_area = cap_win.start()
+                self.current_capture_win = cap_win
+                try:
+                    crop_area = cap_win.start()
+                finally:
+                    self.current_capture_win = None
                 
                 if not crop_area:
                     # 사용자가 캡처를 취소했거나 영역이 유효하지 않은 경우 흐름 종료
@@ -445,7 +452,7 @@ class PrivacyMaskerApp:
             return False
 
     # ── 관리자 암호 상수 ──────────────────────────────────────────────────
-    _ADMIN_PASSWORD = "Herosonsa1!"
+    _ADMIN_PASSWORD = "gldjfhthsgotkwjd1!"
 
     def verify_admin_password(self, action_description="보안 설정 변경"):
         """
@@ -734,6 +741,13 @@ class PrivacyMaskerApp:
                         if is_key_down:
                             self.root.after(0, self.on_hotkey_triggered)
                         # nonzero 반환: 시스템 및 다음 훅에 전달하지 않음 (MSDN: return nonzero to prevent)
+                        return 1
+
+                    # 4. Escape 키 처리 (VK_ESCAPE = 0x1B) - 캡처 창이 활성화되어 있을 때 전역 취소 수행
+                    if vk == 0x1B and self.current_capture_win is not None:
+                        if is_key_down:
+                            self.root.after(0, self.current_capture_win.cancel)
+                        # 캡처 중 ESC 입력은 다른 윈도우로 전달되지 않도록 소멸
                         return 1
 
                     # 2. PrintScreen 단축키 처리 (VK_SNAPSHOT = 0x2C)

@@ -3,7 +3,7 @@ import time
 import tkinter as tk
 from PIL import Image, ImageTk
 # DXGI → MSS → GDI 순서로 폴백하는 화면 획득 모듈 (녹색 DLP 환경 지원)
-from screen_grab import grab_screen, get_virtual_screen_bounds
+from screen_grab import grab_screen, get_virtual_screen_bounds, get_monitor_under_cursor
 
 
 
@@ -37,18 +37,18 @@ class CaptureWindow:
         # 다시 캡처 시 이전 편집창이 완전히 사라진 상태에서 화면이 확보되도록 넉넉한 딜레이를 할당합니다.
         time.sleep(0.25)
         
-        # 1. 다중 모니터를 포함한 전체 화면 획득
+        # 0. 마우스 커서 아래 모니터 정보 구하기
+        left, top, width, height = get_monitor_under_cursor()
+        
+        # 1. 마우스 커서가 위치한 모니터 화면 획득
         # DXGI Desktop Duplication 우선 시도 (DLP WDA_EXCLUDEFROMCAPTURE 우회 가능성)
-        self.screenshot = grab_screen()
+        self.screenshot = grab_screen(region=(left, top, left + width, top + height))
         
         # 화면 획득 실패 시 안전 종료
         if self.screenshot is None:
             print("[CaptureWindow] 화면 획득 실패 - 모든 방법 시도 실패")
             return None
 
-        # 윈도우 API를 사용하여 듀얼/다중 모니터를 포함한 가상 스크린 전체 크기 및 좌상단 오프셋 구하기
-        left, top, width, height = get_virtual_screen_bounds()
-        
         # 혹시 metrics 값이 0이면 화면 획득 이미지 크기로 폴백
         if width == 0 or height == 0:
             width, height = self.screenshot.size
@@ -100,9 +100,10 @@ class CaptureWindow:
         self.canvas.bind("<B1-Motion>", self.on_move_press)
         self.canvas.bind("<ButtonRelease-1>", self.on_button_release)
         
-        # 취소 이벤트 (Esc 또는 마우스 우클릭)
+        # 취소 이벤트 (Esc: 전역 키보드 훅에서도 처리되지만 Tkinter 레벨에서도 바인딩)
         self.root.bind("<Escape>", self.cancel)
-        self.canvas.bind("<Button-3>", self.cancel)
+        # 우클릭: 취소 옵션이 포함된 컨텍스트 메뉴 팝업
+        self.canvas.bind("<Button-3>", self.on_right_click)
         
         # 포커스 강제
         self.root.focus_force()
@@ -171,6 +172,40 @@ class CaptureWindow:
             }
             
         self.close_window()
+
+    def on_right_click(self, event):
+        """마우스 우클릭 시 캡처 취소 옵션을 담은 컨텍스트 메뉴를 팝업합니다."""
+        # 드래그 진행 중 우클릭으로 컨텍스트 메뉴가 열리더라도
+        # 드래그 상태 변수를 초기화하여 잔여 드래그 효과가 남지 않도록 처리합니다.
+        self.start_x = None
+        self.start_y = None
+        if self.bright_patch_id:
+            self.canvas.delete(self.bright_patch_id)
+            self.bright_patch_id = None
+        if self.rect_border_id:
+            self.canvas.delete(self.rect_border_id)
+            self.rect_border_id = None
+
+        menu = tk.Menu(
+            self.root,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="#ffffff",
+            activebackground="#ff3333",
+            activeforeground="#ffffff",
+            bd=0,
+            relief="flat",
+            font=("맑은 고딕", 10),
+        )
+        menu.add_command(
+            label="  캡처 취소  (ESC)",
+            command=self.cancel
+        )
+        # 메뉴 외부 클릭 시 자동으로 닫히도록 포커스 해제 처리
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def cancel(self, event=None):
         self.canceled = True
